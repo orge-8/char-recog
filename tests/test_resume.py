@@ -1,9 +1,12 @@
 """The pause boundary preserves optimizer, augmentation RNG and data ordering."""
 
-import torch
 import pytest
-from recog.model import TrainingPaused, train
-from test_catalog import corpus
+
+torch = pytest.importorskip("torch", reason="断点恢复用例需要 PyTorch")
+pytest.importorskip("torchvision", reason="断点恢复用例需要 torchvision")
+
+from recog.model import TrainingPaused, train  # noqa: E402
+from test_catalog import corpus  # noqa: E402
 
 
 @pytest.mark.parametrize("boundary", ["training", "validation"])

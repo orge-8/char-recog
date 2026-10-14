@@ -43,11 +43,14 @@ class CharacterRecognition(MaiBotPlugin):
     service: Optional[Service] = None
 
     async def on_load(self) -> None:
+        # 组件注册先于 on_load（runner 先 _register_plugin 再 _invoke_plugin_on_load），
+        # 因此 on_load 让出事件循环期间消息钩子就可能被触发。先备好钩子要用的状态，
+        # 再把 service 挂上去，避免这段窗口里抛 AttributeError。
+        self._image_cache = {}
         self.service = await offload(Service, self.ctx.paths.data_dir, self.config.worker_python)
         from .recog.environment import recover
         await offload(recover, self.service)
         await self.sync_characters()
-        self._image_cache = {}
 
     async def sync_characters(self) -> None:
         """Persist the configured character list for the WebUI selectors."""
@@ -61,7 +64,7 @@ class CharacterRecognition(MaiBotPlugin):
     @HookHandler("chat.receive.before_process", timeout_ms=8000)
     async def annotate_received_images(self, message: dict, **kwargs: Any) -> dict:
         """Annotate individual received media without collecting training examples."""
-        if not self.config.auto_recognize or not self.service.inference_enabled:
+        if self.service is None or not self.config.auto_recognize or not self.service.inference_enabled:
             return {"action": "continue"}
         versions = await offload(self.active_versions)
         if not versions:

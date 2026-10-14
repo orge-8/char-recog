@@ -1,20 +1,20 @@
-"""Migrate MaiSelfPlugin (maibot.mai-recog-self) data into cv-char-recog.
+"""Migrate MaiSelfPlugin (maibot.mai-recog-self) data into char-recog.
 
 Source: the upstream plugin's data directory, e.g.
   MaiBot/data/plugins/maibot.mai-recog-self/
     catalog.sqlite3  images/  jobs/<job>/  models/<job>/weights.pt
 
-Target: this plugin's data directory (org.civetc.cv-char-recog). The whole
-source catalog is attributed to ONE character (--character, default 鸣澜):
-"self" means "is that character", "other" means "is not". Train/val/test
-splits, labels, removal reasons and the trained model lineage are preserved,
-so incremental training continues from the migrated model.
+Target: this plugin's data directory (org.civetc.char-recog). The whole
+source catalog is attributed to ONE character (--character): "self" means
+"is that character", "other" means "is not". Train/val/test splits, labels,
+removal reasons and the trained model lineage are preserved, so incremental
+training continues from the migrated model.
 
 Usage (run from the plugin directory):
   python tools/migrate_from_maiself.py \
       --src  ../maibot.mai-recog-self \
-      --dst  ../org.civetc.cv-char-recog \
-      --character 鸣澜 [--dry-run]
+      --dst  ../org.civetc.char-recog \
+      --character 洛天依 [--dry-run]
 
 The target may already contain data for other characters; migration skips
 source images whose sha already exists under the same character.
@@ -155,8 +155,8 @@ def migrate(source: Path, target: Path, character: str, dry_run: bool = False) -
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--src", required=True, type=Path, help="MaiSelfPlugin 数据目录（含 catalog.sqlite3）")
-    parser.add_argument("--dst", required=True, type=Path, help="cv-char-recog 数据目录")
-    parser.add_argument("--character", default="鸣澜", help="源图库归属的角色名（默认 鸣澜）")
+    parser.add_argument("--dst", required=True, type=Path, help="char-recog 数据目录")
+    parser.add_argument("--character", required=True, help="源图库整体归属的角色名（必须显式指定）")
     parser.add_argument("--dry-run", action="store_true", help="只打印迁移计划，不写入")
     args = parser.parse_args()
     migrate(args.src, args.dst, args.character, args.dry_run)

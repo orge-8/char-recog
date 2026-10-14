@@ -28,7 +28,7 @@ RTX 5060 Ti 16GB 使用独立既有CUDA环境完成1轮训练、验证、测试�
 
 ## 部署限制
 
-SDK 2.11.0 尚未发布，当前使用本地SDK路径。主程序依赖保持已发布的SDK>=2.10.0，`uv run --locked`依赖解析通过。插件要求新版宿主与SDK，安装及启动方式见README。合成测试结果不能作为产品识别效果的承诺；管理员应提供真实正负例并检查独立新图片。
+SDK 2.11.0 已于 2026-10-09 发布（当前最新 2.13.0），宿主最新为 1.3.7；本插件声明 `host_application ≥1.3.6`、`sdk ≥2.11.0`，用已发布版本即可，无需本地 SDK 路径。插件已按宿主 loader 语义在 SDK 2.11.0 与 2.13.0 下验证导入与 `create_plugin()`。安装及启动方式见 README。合成测试结果不能作为产品识别效果的承诺；管理员应提供真实正负例并检查独立新图片。
 
 ## 2026-10-10 交互与暂停更新核验
 
@@ -46,4 +46,10 @@ SDK 2.11.0 尚未发布，当前使用本地SDK路径。主程序依赖保持已
 
 2026-10-10：默认继承MaiBot解释器，重依赖仅安装到插件数据目录 dependencies/packages，子进程在 .pth 处理前优先加载覆盖层。安装先暂存并核验真实导入路径再切换，失败保留旧层；卸载只删除覆盖层，底层包不卸载。
 
-在临时数据目录实装 torch 2.11.0+cpu / torchvision 0.26.0+cpu，使用MaiBot主环境Python完成15轮合成样本CPU训练、权重/隔离/重载核验、启用与推理，再卸载覆盖层。安装和卸载前后主环境全部发行包的 METADATA/RECORD/INSTALLER SHA清单一致。核验记录：C:\Users\Sengoku\AppData\Local\Temp\mai-self-overlay-ejubvf08\verification.json。训练含验证 7.18秒，总训练流程 7.48秒，峰值RSS 459.8MiB。此轮未修改用户图库或启用用户模型，未重复GPU流程。
+在临时数据目录实装 torch 2.11.0+cpu / torchvision 0.26.0+cpu，使用MaiBot主环境Python完成15轮合成样本CPU训练、权重/隔离/重载核验、启用与推理，再卸载覆盖层。安装和卸载前后主环境全部发行包的 METADATA/RECORD/INSTALLER SHA清单一致。核验记录保存在该轮的临时数据目录（`.../mai-self-overlay-*/verification.json`，已随临时目录清理，不再记录本机绝对路径）。训练含验证 7.18秒，总训练流程 7.48秒，峰值RSS 459.8MiB。此轮未修改用户图库或启用用户模型，未重复GPU流程。
+
+## 2026-10-14 提交插件中心前复核
+
+- 静态：`check_submission.py` 逐条复核关卡 1；`_manifest.json` 通过宿主 `PluginManifest` 校验；`webui.json` 通过宿主（1.3.7）`load_webui_extension` 校验；`plugin.py` 在 SDK 2.11.0 与 2.13.0 下按宿主 loader 语义导入成功，`capabilities` 与代码实际调用逐项一致。
+- 测试：`python -m pytest tests` → 52 passed / 4 skipped（本机无 PyTorch，3 个训练相关模块自动跳过，1 项需 MaiBot `src.plugin_runtime`）。本轮**未**执行需要 PyTorch 的 CPU/CUDA 端到端流程，上述历史数据仍以原环境为准。
+- 修复：Hook 在 `on_load` 完成前被派发时的 `AttributeError`（先备状态 + 钩子首行判空）；`tests/test_cpu_acceptance.py` 按当前 `submit/activate/rollback/infer` 签名重写。

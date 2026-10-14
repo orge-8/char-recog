@@ -1,5 +1,26 @@
 # 更新日志
 
+## 0.3.2 · 2026-10-14（插件中心提交前整改）
+
+提交官方插件中心前的整备，全部为文档/测试/健壮性改动，训练与推理链路（`recog/model.py`）零改动。
+
+- 修复：Hook 在 `on_load` 完成前被触发时的 `AttributeError`。宿主先注册组件再调用 `on_load`，
+  而 `on_load` 内部会 await 线程化 IO，这段窗口里消息钩子可能被派发 —— 原实现读
+  `self.service.inference_enabled` 与 `self._image_cache` 都会抛异常。现在先备好钩子状态、
+  并在钩子首行判定 `self.service is None`。
+- 修复：`tests/test_cpu_acceptance.py` 仍是单角色时代的用例（`service.submit/activate/rollback/infer`
+  都按旧签名调用），导致 `python -m pytest tests` 必红。已按当前签名重写，并让 3 个需要 PyTorch 的
+  模块在缺依赖时自动跳过（原本 `test_input_size`/`test_resume` 会在收集阶段报错）。
+- 修正：`_manifest.json` 的 `version` 提升到 `0.3.2`，与本次发布对应。
+- 文档：README 全面对齐当前实现（插件目录、`characters` 配置、`recognize_character_image` 签名、
+  `ctx.paths.data_dir` 数据位置、上传体积上限），新增「依赖模型」「数据流向与网络访问」两节，
+  并把原「上游 README 原文」改为「与上游的差异」对照表，避免原文中的旧配置名/旧路径继续误导。
+- 文档：`VALIDATION.md` 删除开发者本机临时目录路径，更正「SDK 2.11.0 尚未发布」这一过期结论
+  （该版本已于 2026-10-09 发布）。
+- 文档：`pyproject.toml` 的 worker 工程名去残留（`mai-recog-self-worker` → `char-recog-worker`），版本对齐 `0.3.2`。
+- 文档：`webui/build.py` 与 `tools/migrate_from_maiself.py` 的注释/帮助里残留的旧目录名与旧插件 ID
+  （`mai_recog_self`、`org.civetc.cv-char-recog`）改为当前值；`--character` 改为必填，去掉个人角色名默认值。
+
 ## 0.3.1 · 2026-10-14（上线前全检整改）
 
 - **消除动态执行面**：worker 探针从 `-c <代码片段>` 改为具名模块 `-m recog.probes <name>`

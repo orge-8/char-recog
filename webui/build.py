@@ -1,7 +1,8 @@
 """Generate standalone sidebar pages from the shared HTML source.
 
-Run with `uv run --no-sync python plugins/mai_recog_self/webui/build.py`
-after editing index.html. No Node tooling or host changes are required.
+Run with `uv run --no-sync python webui/build.py` from the plugin directory
+(e.g. `plugins/char-recog/`) after editing index.html. No Node tooling or host
+changes are required.
 """
 
 from pathlib import Path

@@ -1,10 +1,14 @@
 """Input size belongs to each snapshot and saved model."""
 from pathlib import Path
-import torch
+
 import pytest
-from PIL import Image
-from recog.model import Dataset, fresh_model, infer, loaded_model, train
-from test_catalog import corpus
+
+pytest.importorskip("torch", reason="输入尺寸用例需要 PyTorch")
+pytest.importorskip("torchvision", reason="输入尺寸用例需要 torchvision")
+
+from PIL import Image  # noqa: E402
+from recog.model import Dataset, fresh_model, infer, loaded_model, train  # noqa: E402
+from test_catalog import corpus  # noqa: E402
 
 
 def test_resize_precedes_augmentation(tmp_path):
