@@ -4,7 +4,7 @@
   "name": "角色识别",
   "description": "按角色标注、训练与版本管理（每角色一个二分类模型）；自动识别收到的图片中的角色并添加上下文提示。基于 SengokuCola/MaiSelfPlugin 泛化改造。",
   "author": {
-    "name": "civetc",
+    "name": "orge-8",
     "url": "https://github.com/orge-8"
   },
   "license": "GPL-3.0-or-later",
