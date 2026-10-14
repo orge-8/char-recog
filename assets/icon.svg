@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <title>照片上的人是你吗？</title>
+  <desc>暖纸色底上两个错位的折角轮廓，薄荷绿与杏橙在中央形成炭黑交叠区域。</desc>
+  <rect width="256" height="256" rx="48" fill="#F7F1E4"/>
+  <path d="M48 62h84l32 32v84H80l-32-32Z" fill="#A4C8AA"/>
+  <path d="M92 78h84l32 32v84h-84l-32-32Z" fill="#ED8C57"/>
+  <path d="M92 78h56l16 16v84h-56l-16-16Z" fill="#292C29"/>
+  <path d="M66 82h55l23 23v53" stroke="#F7F1E4" stroke-width="7" stroke-linejoin="miter"/>
+  <path d="M112 101h55l22 22v52h-54" stroke="#F7F1E4" stroke-width="7" stroke-linejoin="miter"/>
+  <path d="M70 211h30" stroke="#292C29" stroke-width="6"/>
+  <path d="M107 211h10" stroke="#ED8C57" stroke-width="6"/>
+</svg>
