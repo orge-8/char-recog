@@ -12,9 +12,10 @@ import time
 
 
 def wheel_urls(python: str, build: str) -> list[tuple[str, str]]:
+    package_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [python, "-c", "import json,sys,platform;print(json.dumps([sys.version_info[:2],sys.platform,platform.machine()]))"],
-        capture_output=True, text=True, check=True, timeout=15,
+        [python, "-m", "recog.probes", "interpreter_info"],
+        capture_output=True, text=True, check=True, timeout=15, cwd=package_root,
     )
     version, system, machine = json.loads(result.stdout)
     tag = f"cp{version[0]}{version[1]}"

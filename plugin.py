@@ -4,6 +4,7 @@ Generalized from SengokuCola/MaiSelfPlugin (GPL-3.0): one binary model per
 character; "self" means "is this character", "other" means "is not".
 """
 
+import logging
 from pathlib import Path
 from typing import Any, Literal, Optional
 import base64
@@ -18,6 +19,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 from .recog.service import Service, offload
 
 DEFAULT_CHARACTERS = ["洛天依", "言和", "乐正绫", "乐正龙牙", "徵羽摩柯", "墨清弦", "星尘", "心华"]
+_LOG = logging.getLogger("char-recog")
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -100,7 +102,9 @@ class CharacterRecognition(MaiBotPlugin):
                                     "data": f"\n[提示：此图中的角色看起来很可能是 “{item['character']}”]\n",
                                 }
                             )
-                except (ValueError, OSError):
+                except (ValueError, OSError) as exc:
+                    # 保留消息原文（fail-open），但留一条线索：哪张图、为什么跳过。
+                    _LOG.debug("跳过无法识别的图片：%s 字节 · %s", len(binary) if isinstance(binary, str) else -1, exc)
                     continue
             return result
 

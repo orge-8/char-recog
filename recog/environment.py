@@ -14,19 +14,6 @@ from .store import atomic_json
 from .processes import process_alive
 from .dependency_download import prepare_wheels
 
-PROBE = """import json,sys,importlib.util
-r={'python':sys.executable,'installed':False,'cuda':False}
-r['missing']=[name for name in ('torch','torchvision') if importlib.util.find_spec(name) is None]
-try:
- import torch,torchvision
- r.update(installed=True,torch=torch.__version__,torchvision=torchvision.__version__,build_cuda=torch.version.cuda,cuda=torch.cuda.is_available(),torch_path=torch.__file__,torchvision_path=torchvision.__file__)
- if r['cuda']:
-  x=torch.ones(2,device='cuda'); r['cuda']=bool((x+x).sum().item()==4); r['gpu']=torch.cuda.get_device_name(0)
-except Exception as e:r['error']=str(e)
-print(json.dumps(r))
-"""
-
-
 def status(service):
     try:
         service.check_environment_idle()
@@ -37,7 +24,7 @@ def status(service):
         service.environment_checked = now
         service.environment_cache = {"installed": False, "cuda": False, "detecting": True}
         threading.Thread(target=probe_environment,
-                         args=(service, service.python, service.environment_cache, service.runtime_command("-c", PROBE)),
+                         args=(service, service.python, service.environment_cache, service.runtime_command("-m", "recog.probes", "environment_status")),
                          daemon=True).start()
     r = dict(service.environment_cache)
     return describe(service, r)
@@ -331,7 +318,7 @@ def _install(root: Path, python: str, kind: str, overlay: Path | None = None) ->
             command = [python, "-X", "utf8"]
             if stage is not None:
                 command.extend(["-m", "recog.bootstrap", str(stage)])
-            probe = subprocess.run([*command, "-c", PROBE], cwd=Path(__file__).resolve().parents[1],
+            probe = subprocess.run([*command, "-m", "recog.probes", "environment_status"], cwd=Path(__file__).resolve().parents[1],
                                    capture_output=True, text=True, encoding="utf-8", check=True)
             verified = json.loads(probe.stdout)
             print(json.dumps(verified, ensure_ascii=False), flush=True)

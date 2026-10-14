@@ -83,8 +83,10 @@ def test_overlay_precedence_and_base_fallback(tmp_path):
         (extra / "pth_sample.py").write_text("value='pth'", encoding="utf-8")
         (service.overlay_path / "extra.pth").write_text("extra\nimport overlay_sample\n", encoding="utf-8")
         env = {**os.environ, "PYTHONPATH": str(base)}
-        code = "import json,overlay_sample,base_only_sample,pth_sample; print(json.dumps([overlay_sample.value,base_only_sample.value,pth_sample.value]))"
-        result = subprocess.run(service.runtime_command("-c", code), cwd=PACKAGE_ROOT, env=env, capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            service.runtime_command("-m", "recog.probes", "overlay_import", "overlay_sample", "base_only_sample", "pth_sample"),
+            cwd=PACKAGE_ROOT, env=env, capture_output=True, text=True, check=True,
+        )
         assert json.loads(result.stdout) == ["overlay", "inherited", "pth"]
         ordinary = subprocess.run([sys.executable, "-c", "import overlay_sample; print(overlay_sample.value)"], env=env, capture_output=True, text=True, check=True)
         assert ordinary.stdout.strip() == "base"

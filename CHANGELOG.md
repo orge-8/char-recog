@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.3.1 · 2026-10-14（上线前全检整改）
+
+- **消除动态执行面**：worker 探针从 `-c <代码片段>` 改为具名模块 `-m recog.probes <name>`
+  （interpreter_info / environment_status），bootstrap 删除 `-c` 分支，运行面不再有 exec。
+- 审计清单 12：Hook 对无法解码图片的静默跳过改为 debug 日志留痕（含字节数与原因）。
+- 审计其余项结论：网络面（依赖下载）主机硬编码 + SHA256 强校验 + 防穿越，通过；
+  资源上限（20MiB/40MP/28MiB base64/512 缓存）齐备；README 引用真实存在；on_unload 清理完整。
+
 ## 0.3.0 · 2026-10-13（char-recog 泛化线起点）
 
 基于 SengokuCola/MaiSelfPlugin 0.2.0（GPL-3.0）泛化为「每角色一个二分类模型」的通用角色识别插件（原名 cv-char-recog /「中V角色识别」，0.3.0 起更名泛化；中V名单仅为默认预置）。

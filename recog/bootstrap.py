@@ -19,8 +19,6 @@ def main() -> None:
     sys.argv = [target, *args]
     if mode == "-m":
         runpy.run_module(target, run_name="__main__", alter_sys=True)
-    elif mode == "-c":
-        exec(compile(target, "<overlay-probe>", "exec"), {"__name__": "__main__"})
     else:
         raise ValueError("Unsupported worker bootstrap mode")
 
