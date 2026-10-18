@@ -13,6 +13,7 @@ import time
 import uuid
 
 from .images import decode, fingerprint, similar, thumbnail
+from .scores import DEFAULT_THRESHOLD, EVALUATION_THRESHOLD, MAX_THRESHOLD, MIN_THRESHOLD
 
 
 def dump(value: Any) -> str:
@@ -37,6 +38,38 @@ def atomic_json(path: Path, value: Any) -> None:
             time.sleep(.02)
 
 
+class SourceIndex:
+    """O(1) equivalent of scanning ``reversed(sources)`` for the first match.
+
+    The reference implementation returns at the first source (scanning from the
+    end) whose group_id, sha, or decoded hash matches, so the answer is decided
+    by the highest matching index. Three separate maps keep the three key spaces
+    apart: a flat map would let ``row["sha"]`` collide with some other source's
+    ``decoded`` value and produce a match the reference never makes.
+    """
+
+    __slots__ = ("sources", "groups", "shas", "decoded")
+
+    def __init__(self, sources):
+        self.sources = sources
+        self.groups: dict = {}
+        self.shas: dict = {}
+        self.decoded: dict = {}
+        for index, source in enumerate(sources):
+            # Later writes overwrite earlier ones: "last occurrence wins".
+            self.groups[source["group_id"]] = index
+            self.shas[source["sha"]] = index
+            self.decoded[source["decoded"]] = index
+
+    def seen(self, row) -> bool:
+        index = max(
+            self.groups.get(row["group_id"], -1),
+            self.shas.get(row["sha"], -1),
+            self.decoded.get(row["decoded"], -1),
+        )
+        return index >= 0 and self.sources[index]["label"] == row["label"]
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -47,7 +80,7 @@ class Store:
               PRAGMA journal_mode=WAL;
               CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '');
               CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, split TEXT);
-              CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request_key TEXT UNIQUE, state TEXT, pid INTEGER, error TEXT, created REAL, snapshot_sha TEXT, character TEXT NOT NULL DEFAULT '');
+              CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request_key TEXT UNIQUE, state TEXT, pid INTEGER, error TEXT, created REAL, snapshot_sha TEXT, character TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '', input_size INTEGER);
               CREATE UNIQUE INDEX IF NOT EXISTS one_training ON jobs((1)) WHERE state IN ('queued','running','cancelling');
               CREATE UNIQUE INDEX IF NOT EXISTS one_training_v2 ON jobs((1)) WHERE state IN ('queued','running','pausing','cancelling');
               CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY, job_id TEXT, sha TEXT, metrics TEXT, created REAL, character TEXT NOT NULL DEFAULT '');
@@ -60,6 +93,13 @@ class Store:
                 columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
                 if "character" not in columns:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN character TEXT NOT NULL DEFAULT ''")
+            # 0.4.0: device/size live on the row so listing jobs stops reading
+            # every snapshot.json (25 MiB per poll on a busy install).
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "device" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN device TEXT NOT NULL DEFAULT ''")
+            if "input_size" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN input_size INTEGER")
 
     @contextmanager
     def db(self) -> Iterator[sqlite3.Connection]:
@@ -109,6 +149,53 @@ class Store:
         """Characters that currently have an active model (inference targets)."""
         with self.db() as db:
             return sorted(row[0][len("active:"):] for row in db.execute("SELECT key FROM settings WHERE key LIKE 'active:%'") if row[0].startswith("active:"))
+
+    @staticmethod
+    def _parse_threshold(raw) -> float | None:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        # `value != value` rejects NaN, which float() happily accepts.
+        if value != value or not MIN_THRESHOLD <= value <= MAX_THRESHOLD:
+            return None
+        return value
+
+    def _threshold(self, db: sqlite3.Connection, character: str) -> float:
+        row = db.execute("SELECT value FROM settings WHERE key=?", (f"threshold:{character}",)).fetchone()
+        return self._parse_threshold(row[0] if row else None) or DEFAULT_THRESHOLD
+
+    def threshold(self, character: str) -> float:
+        """Per-character online gate; falls back to the default on corrupt data."""
+        character = self.validate_character(character)
+        with self.db() as db:
+            return self._threshold(db, character)
+
+    def thresholds(self) -> dict:
+        """Every configured gate in one query, for the inference worker."""
+        with self.db() as db:
+            rows = db.execute("SELECT key,value FROM settings WHERE key LIKE 'threshold:%'").fetchall()
+        result = {}
+        for key, value in rows:
+            parsed = self._parse_threshold(value)
+            if parsed is not None:
+                result[key[len("threshold:"):]] = parsed
+        return result
+
+    def set_threshold(self, character: str, value) -> dict:
+        character = self.validate_character(character)
+        parsed = self._parse_threshold(value)
+        if parsed is None:
+            raise ValueError(f"阈值必须是 {MIN_THRESHOLD} 到 {MAX_THRESHOLD} 之间的数字")
+        self.set_setting(f"threshold:{character}", f"{parsed:.3f}")
+        return {"character": character, "threshold": parsed, "default": DEFAULT_THRESHOLD}
+
+    def clear_threshold(self, character: str) -> dict:
+        """Delete the override instead of writing 0.6: "default" stays a moving target."""
+        character = self.validate_character(character)
+        with self.db() as db:
+            db.execute("DELETE FROM settings WHERE key=?", (f"threshold:{character}",))
+        return {"character": character, "threshold": DEFAULT_THRESHOLD, "default": DEFAULT_THRESHOLD}
 
     def _reconcile(self, db: sqlite3.Connection, group: str) -> None:
         rows = db.execute(
@@ -212,26 +299,52 @@ class Store:
             self._reconcile(db, row[0])
         return {"id": image_id, "removed": removed}
 
-    def batch_update(self, image_ids: str, operation: str) -> dict:
+    @staticmethod
+    def split_ids(image_ids) -> list:
+        """Accept both CSV and a JSON array string.
+
+        0.3.3 and earlier pages sent `JSON.stringify([...selected])`; the host may
+        also cache page files, so both shapes stay valid instead of failing late.
+        """
+        if isinstance(image_ids, (list, tuple)):
+            values = [str(value).strip() for value in image_ids]
+        elif isinstance(image_ids, str) and image_ids.strip().startswith("["):
+            try:
+                parsed = json.loads(image_ids)
+            except ValueError as exc:
+                raise ValueError("无效图片ID") from exc
+            if not isinstance(parsed, list):
+                raise ValueError("无效图片ID")
+            values = [str(value).strip() for value in parsed]
+        else:
+            values = [value.strip() for value in str(image_ids or "").split(",")]
+        return list(dict.fromkeys(value for value in values if value))
+
+    def batch_update(self, image_ids, operation: str, character: str = "") -> dict:
         """Apply the entire selection in one transaction, without partial updates."""
         if operation not in {"self", "other", "remove", "remove_all"}:
             raise ValueError("无效批量操作")
-        ids = list(dict.fromkeys(image_ids.split(","))) if image_ids else []
+        ids = self.split_ids(image_ids)
         if operation != "remove_all" and (not ids or len(ids) > 1000):
             raise ValueError("请先选择图片，每批最多1000张")
         if any(len(i) != 32 or any(c not in "0123456789abcdef" for c in i) for i in ids):
             raise ValueError("无效图片ID")
+        if operation == "remove_all":
+            # Scoped on purpose: this button lives on a single character's page.
+            character = self.validate_character(character)
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             if operation == "remove_all":
-                rows = db.execute("SELECT id,group_id FROM images WHERE removed=0").fetchall()
-                db.execute("UPDATE images SET removed=1 WHERE removed=0")
+                rows = db.execute(
+                    "SELECT id,group_id FROM images WHERE removed=0 AND character=?", (character,)
+                ).fetchall()
+                db.execute("UPDATE images SET removed=1 WHERE removed=0 AND character=?", (character,))
             else:
                 placeholders = ",".join("?" for _ in ids)
                 rows = db.execute(f"SELECT id,group_id FROM images WHERE id IN ({placeholders})", ids).fetchall()
                 if len(rows) != len(ids):
                     raise ValueError("选择中有不存在的图片，请清空选择后重新选择")
-                if operation in {"self", "other"}:
+                if operation in {"self", "other", "remove"}:
                     characters = {
                         row[0]
                         for row in db.execute(
@@ -261,13 +374,12 @@ class Store:
 
     @staticmethod
     def source_seen(row, sources) -> bool:
-        for source in reversed(sources):
-            if source["group_id"] == row["group_id"] or source["sha"] == row["sha"] or source["decoded"] == row["decoded"]:
-                return source["label"] == row["label"]
-        return False
+        """Compatibility wrapper; hot paths build a SourceIndex instead."""
+        return SourceIndex(sources).seen(row)
 
     def images(self, page: int = 1, view: str = "all", job_id: str = "", character: str = "") -> dict:
         character = self.validate_character(character)
+        threshold = self.threshold(character)
         if page < 1 or view not in {"all", "eligible", "excluded", "unlabelled", "errors", "removed"}:
             raise ValueError("无效分页")
         where = {
@@ -290,11 +402,14 @@ class Store:
                     "pagination": {"page": 1, "pages": 1, "total": 0},
                 }
             report = self.report(job_id)
-            predictions = {r["id"]: r for r in report.get("test_predictions", []) + report.get("validation_predictions", [])}
+            pairs = report.get("test_predictions", []) + report.get("validation_predictions", [])
+            predictions = {r["id"]: r for r in pairs}
+            # "Misjudged" is relative to the gate in force now, not the 0.5 the
+            # training report was generated with.
             error_ids = {
                 r["id"]
-                for r in report.get("test_predictions", []) + report.get("validation_predictions", [])
-                if r["predicted"] != r["label"]
+                for r in pairs
+                if ("self" if r["score"] >= threshold else "other") != r["label"]
             }
         parameters: list = [character]
         if view == "errors":
@@ -312,20 +427,24 @@ class Store:
                 f"SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id WHERE {where} ORDER BY i.created DESC LIMIT 24 OFFSET ?",
                 [*parameters, (page - 1) * 24],
             )]
+        index = SourceIndex(sources)
         gallery = []
         for r in rows:
             reasons = {"solid": "纯色/近纯色", "duplicate": "同图变体，仅保留一个代表", "label_conflict": "同图身份标签冲突", "split_conflict": "连接了不同历史划分"}
             r["status"] = "已移出训练库" if r["removed"] else reasons.get(r["reason"], "跳过" if r["label"] == "skip" else "可用")
             r["label_text"] = {"self": f"是{character}", "other": f"不是{character}", "skip": "跳过"}.get(r["label"], "未标注")
-            r["trained"] = self.source_seen(r, sources)
+            r["trained"] = index.seen(r)
             r["training_text"] = "当前模型已训练" if r["trained"] else "验证集" if r["split"] == "val" else "测试集" if r["split"] == "test" else "待训练"
             prediction = predictions.get(r["id"])
-            r["model_text"] = (
-                f"模型：{'是' + character if prediction['predicted'] == 'self' else '不是' + character}"
-                f" · 得分 {prediction['score']:.3f} · 冻结真值：{'是' + character if prediction['label'] == 'self' else '不是' + character}"
-                if prediction
-                else ""
-            )
+            if prediction:
+                predicted = "self" if prediction["score"] >= threshold else "other"
+                r["model_text"] = (
+                    f"模型：{'是' + character if predicted == 'self' else '不是' + character}"
+                    f" · 得分 {prediction['score']:.3f}（阈值 {threshold:.2f}）"
+                    f" · 冻结真值：{'是' + character if prediction['label'] == 'self' else '不是' + character}"
+                )
+            else:
+                r["model_text"] = ""
             gallery.append(
                 {
                     "thumbnail": thumbnail(self.root / r["path"], self.root / "thumbnails" / (r["sha"] + "-512.jpg")),
@@ -356,7 +475,8 @@ class Store:
             active = self.active(character)
             sources = self.trained_sources(db, active)
             candidates = db.execute("SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id WHERE i.character=? AND i.removed=0 AND i.reason='' AND i.label IN ('self','other') AND (g.split='train' OR g.split IS NULL)", (character,)).fetchall()
-            pending = sum(not self.source_seen(r, sources) for r in candidates)
+        index = SourceIndex(sources)
+        pending = sum(not index.seen(r) for r in candidates)
         return {
             "can_train": min(counts.values()) >= 20,
             "has_model": bool(active),
@@ -416,7 +536,8 @@ class Store:
             mode = "fresh"
         inherited_sources = self.trained_sources(db, parent)
         if parent:
-            rows = [r for r in rows if r["split"] != "train" or not self.source_seen(r, inherited_sources)]
+            inherited = SourceIndex(inherited_sources)
+            rows = [r for r in rows if r["split"] != "train" or not inherited.seen(r)]
             if not any(r["split"] == "train" for r in rows):
                 raise ValueError("没有待训练图片，请新增图片、修改标签或选择从头训练")
         learned = [r for r in rows if r["split"] == "train"]
@@ -442,7 +563,8 @@ class Store:
             "held_truth": held_truth,
             "comparable_to_previous": not old_truth or held_truth == old_truth,
             "historical_test": bool(previous),
-            "threshold": 0.5,
+            # Evaluation gate only; the online gate is per character (settings).
+            "threshold": EVALUATION_THRESHOLD,
             "created": time.time(),
         }
 
@@ -457,6 +579,26 @@ class Store:
         if row is None:
             raise ValueError("任务不存在")
         return dict(row)
+
+    def backfill_job_meta(self, rows: list, meta) -> None:
+        """Persist device/input_size for rows written before 0.4.0.
+
+        `meta(job_id)` returns ``(device, input_size)`` or ``None``. The UPDATE is
+        limited to rows that are still empty so concurrent polls cannot clash.
+        """
+        updates = []
+        for row in rows:
+            if row.get("device"):
+                continue
+            found = meta(row["id"])
+            if found is None:
+                continue
+            row["device"], row["input_size"] = found
+            updates.append((found[0], found[1], row["id"]))
+        if not updates:
+            return
+        with self.db() as db:
+            db.executemany("UPDATE jobs SET device=?,input_size=? WHERE id=? AND device=''", updates)
 
     def models(self) -> list:
         with self.db() as db:

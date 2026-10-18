@@ -30,7 +30,11 @@ def test_restart_marks_pending_task_interrupted(tmp_path):
     directory = tmp_path / "jobs" / "pending"
     directory.mkdir(parents=True)
     with store.db() as db:
-        db.execute("INSERT INTO jobs VALUES ('pending','old','queued',NULL,'',?, '', ?)", (time.time(), CHAR))
+        db.execute(
+            "INSERT INTO jobs (id,request_key,state,pid,error,created,snapshot_sha,character) "
+            "VALUES ('pending','old','queued',NULL,'',?,'',?)",
+            (time.time(), CHAR),
+        )
     service = Service(tmp_path, sys.executable)
     try:
         assert service.store.job("pending")["state"] == "interrupted"

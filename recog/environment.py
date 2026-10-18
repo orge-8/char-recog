@@ -70,7 +70,28 @@ def describe(service, r):
     gpu = owned and r.get("installed") and bool(r.get("build_cuda"))
     running = job.get("state") == "running"
     training = any(process.poll() is None for process in service.processes.values())
-    inference = service.inference is not None and service.inference.poll() is None
+    state = service.inference_state()
+    inference = state in {"ready", "starting"}
+    retry_in = service.inference_retry_in()
+    installed = bool(r.get("installed"))
+    missing = r.get("missing") or []
+    if state == "stopped":
+        note = "已手动停止；需要识别时请在下方开启推理，或重新加载插件。"
+    elif missing:
+        names = {"torch": "PyTorch", "torchvision": "torchvision", "psutil": "psutil"}
+        note = "未安装 " + "、".join(names.get(name, name) for name in missing) + "，安装后自动开始识别。"
+    elif state == "cooling":
+        note = f"推理异常，约 {retry_in} 秒后自动重试（超时或崩溃不再永久关闭识别）。"
+    elif not installed and not r.get("detecting"):
+        note = "尚未安装 PyTorch，安装后自动开始识别。"
+    elif state == "starting":
+        note = "正在后台启动推理服务，此期间收到的图片暂不加提示。"
+    elif state == "ready":
+        note = "已就绪，收到的图片会自动识别。" + ("训练期间推理降为 1 个 CPU 线程。" if service.desired_threads else "")
+    elif r.get("detecting"):
+        note = "正在检测运行环境，请稍候。"
+    else:
+        note = "未启动；收到图片时会在后台自动启动。"
     detecting = bool(r.get("detecting"))
     states = {"running": "处理中", "complete": "已完成", "failed": "失败", "interrupted": "已中断"}
     operation = states.get(job.get("state"), "尚无任务")
@@ -98,6 +119,20 @@ def describe(service, r):
         can_use_private=not running and not training,
         inference_running=inference,
         inference_enabled=service.inference_enabled,
+        inference_state=state,
+        inference_state_text={
+            "stopped": "已手动停止",
+            "cooling": "冷却中",
+            "starting": "启动中",
+            "ready": "就绪",
+            "cold": "未启动",
+        }.get(state, state),
+        inference_retry_in=retry_in,
+        inference_threads=service.threads_applied,
+        inference_note=note,
+        inference_error=service.last_error,
+        can_start_inference=state in {"stopped", "cold", "cooling"},
+        can_stop_inference=state != "stopped",
         is_private=private,
         mode_text="自定义环境" if private else "共享覆盖层",
         readiness_text="检测中" if detecting else "已就绪" if r.get("installed") else "未就绪",
@@ -136,7 +171,7 @@ def submit(service, kind):
         raise ValueError("自定义环境仅检测和使用，依赖请在该环境中手动管理")
     if kind not in {"cpu", "gpu", "remove"}:
         raise ValueError("无效依赖操作")
-    with service.train_lock, service.infer_lock:
+    with service.train_lock, service.start_lock, service.infer_lock:
         r = status(service)
         if service.environment_process and service.environment_process.poll() is None:
             raise ValueError("依赖任务正在运行")
@@ -144,7 +179,7 @@ def submit(service, kind):
             raise ValueError("环境检测或依赖任务尚未结束，请稍后重试")
         if any(p.poll() is None for p in service.processes.values()):
             raise ValueError("训练正在使用环境")
-        if service.inference is not None and service.inference.poll() is None:
+        if service.inference_state() in {"ready", "starting"}:
             raise ValueError("推理进程正在使用环境，请先停止推理服务")
         if kind == "gpu":
             if not shutil.which("nvidia-smi"):

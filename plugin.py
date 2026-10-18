@@ -17,6 +17,15 @@ from maibot_sdk import API, Tool, HookHandler, MaiBotPlugin, PluginConfigBase, F
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .recog.service import Service, offload
+from .recog.scores import (
+    DEFAULT_THRESHOLD,
+    EVALUATION_THRESHOLD,
+    JUDGMENT_BAND,
+    metrics,
+    select_top,
+    suggest_threshold,
+    sweep,
+)
 
 DEFAULT_CHARACTERS = ["洛天依", "言和", "乐正绫", "乐正龙牙", "徵羽摩柯", "墨清弦", "星尘", "心华"]
 _LOG = logging.getLogger("char-recog")
@@ -51,6 +60,9 @@ class CharacterRecognition(MaiBotPlugin):
         from .recog.environment import recover
         await offload(recover, self.service)
         await self.sync_characters()
+        # Let the monitor warm the worker in the background so the first image
+        # does not have to pay the torch import inside a 6 second chat budget.
+        self.service.enable_auto()
 
     async def sync_characters(self) -> None:
         """Persist the configured character list for the WebUI selectors."""
@@ -61,6 +73,11 @@ class CharacterRecognition(MaiBotPlugin):
         """character -> active model version."""
         return {c: self.service.store.active(c) for c in self.service.store.active_characters()}
 
+    def active_thresholds(self) -> dict:
+        """character -> online gate, for every character with an active model."""
+        limits = self.service.store.thresholds()
+        return {c: limits.get(c, DEFAULT_THRESHOLD) for c in self.service.store.active_characters()}
+
     @HookHandler("chat.receive.before_process", timeout_ms=8000)
     async def annotate_received_images(self, message: dict, **kwargs: Any) -> dict:
         """Annotate individual received media without collecting training examples."""
@@ -69,7 +86,11 @@ class CharacterRecognition(MaiBotPlugin):
         versions = await offload(self.active_versions)
         if not versions:
             return {"action": "continue"}
+        limits = await offload(self.active_thresholds)
         versions_key = tuple(sorted(versions.items()))
+        # Thresholds belong in the cache key: changing one must not reuse the up
+        # to 512 images judged under the previous gate.
+        limits_key = tuple(sorted(limits.items()))
         deadline = time.monotonic() + 6
 
         async def visit(parts):
@@ -89,22 +110,28 @@ class CharacterRecognition(MaiBotPlugin):
                     continue
                 try:
                     raw = base64.b64decode(binary, validate=True)
-                    key = (hashlib.sha256(raw).hexdigest(), versions_key)
+                    key = (hashlib.sha256(raw).hexdigest(), versions_key, limits_key)
                     prediction = self._image_cache.get(key)
                     if prediction is None:
-                        prediction = await offload(self.service.infer, raw, max(0.1, deadline - time.monotonic()))
+                        # wait=False: a cold or cooling worker never blocks the chat
+                        # path; this image simply goes unannotated and the next one
+                        # is picked up once the background warm-up finishes.
+                        prediction = await offload(
+                            self.service.infer, raw, max(0.1, deadline - time.monotonic()), "", wait=False
+                        )
                         if prediction.get("status") == "ok" and prediction.get("results"):
                             if len(self._image_cache) >= 512:
                                 self._image_cache.pop(next(iter(self._image_cache)))
                             self._image_cache[key] = prediction
-                    for item in prediction.get("results", []):
-                        if item.get("status") == "ok" and item["score"] >= 0.6:
-                            result.append(
-                                {
-                                    "type": "text",
-                                    "data": f"\n[提示：此图中的角色看起来很可能是 “{item['character']}”]\n",
-                                }
-                            )
+                    policy = select_top(prediction.get("results", []), limits)
+                    top = policy["top1"]
+                    if top and not policy["ambiguous"]:
+                        result.append(
+                            {
+                                "type": "text",
+                                "data": f"\n[提示：此图中的角色看起来很可能是 “{top['character']}”]\n",
+                            }
+                        )
                 except (ValueError, OSError) as exc:
                     # 保留消息原文（fail-open），但留一条线索：哪张图、为什么跳过。
                     _LOG.debug("跳过无法识别的图片：%s 字节 · %s", len(binary) if isinstance(binary, str) else -1, exc)
@@ -201,8 +228,13 @@ class CharacterRecognition(MaiBotPlugin):
         return await self._action(self.service.store.batch_update, image_ids, operation)
 
     @API("self_images_remove_all", version="1")
-    async def remove_all_images(self) -> dict:
-        return await self._action(self.service.store.batch_update, "", "remove_all")
+    async def remove_all_images(self, character: str = "") -> dict:
+        """Only the selected character is affected; an empty name fails closed."""
+        try:
+            character = self._validate_character(character)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return await self._action(self.service.store.batch_update, "", "remove_all", character)
 
     @API("self_images_batch_positive", version="1")
     async def batch_positive(self, image_ids: str) -> dict:
@@ -304,11 +336,14 @@ class CharacterRecognition(MaiBotPlugin):
             self.service.check_environment_idle()
             if any(p.poll() is None for p in self.service.processes.values()):
                 raise ValueError("训练中不能切换环境")
-            self.stop_inference_sync()
+            # Drop the worker without recording an admin stop: after the switch the
+            # background warm-up brings inference back on the new interpreter.
+            self.service.stop_worker()
             self.service.store.set_setting("worker_override", python)
             self.service.store.set_setting("worker_mode", mode)
             self.service.configure_python()
             self.service.environment_cache = None
+        self.service.restart_inference()
         return {"success": True}
 
     def stop_inference_sync(self):
@@ -323,17 +358,19 @@ class CharacterRecognition(MaiBotPlugin):
     async def start_inference(self) -> dict:
         cache = self.service.environment_cache or {}
         if cache.get("missing"):
-            await offload(self.service.stop_inference)
             names = {"torch": "PyTorch", "torchvision": "torchvision"}
             return {"success": False, "error": "；".join(f"未安装 {names.get(name, name)}" for name in cache["missing"])}
         versions = await offload(self.active_versions)
         if not versions:
             return {"success": False, "error": "尚未启用任何角色模型"}
-        for character, version in sorted(versions.items()):
-            result = await offload(self.service.request, {"operation": "load", "character": character, "version": version}, 8, resume=True)
-            if result.get("status") != "ready":
-                return {"success": False, "error": result.get("error", f"「{character}」模型加载失败"), "result": result}
-        return {"success": True, "result": {"ready_characters": sorted(versions)}}
+        # One character failing to load must not take the whole worker down.
+        result = await offload(self.service.start_inference, 6.0)
+        if result["state"] == "ready":
+            return {"success": True, "result": {"ready_characters": result["ready_characters"]}}
+        if result["state"] in {"starting", "cold", "warming"}:
+            # Cold start continued in the background; this is not a failure.
+            return {"success": True, "result": result, "message": "推理服务正在后台启动，完成后自动开始识别"}
+        return {"success": False, "error": result.get("error") or "推理服务未能启动", "result": result}
 
     @API("self_training_form", version="1")
     async def training_form(self, character: str = "") -> dict:
@@ -349,6 +386,8 @@ class CharacterRecognition(MaiBotPlugin):
             "request_key": key,
             "character": character,
             "input_size": self.config.input_size,
+            "threshold": await offload(self.service.store.threshold, character),
+            "threshold_default": DEFAULT_THRESHOLD,
             **await offload(self.service.store.training_readiness, character),
         }
 
@@ -389,6 +428,33 @@ class CharacterRecognition(MaiBotPlugin):
         if not report:
             return {"summary": "报告尚未完成", "metrics": [], "gallery": [], "pages": 1, "technical": ""}
         character = row.get("character") or report.get("character") or "该角色"
+        current = await offload(self.service.store.threshold, character)
+        stored_selection = report.get("selection", {})
+        # The trainer always evaluates at EVALUATION_THRESHOLD; reports written by
+        # older versions may not carry the field, so fall back to the constant.
+        selection_threshold = stored_selection.get("threshold", EVALUATION_THRESHOLD)
+        validation_predictions = report.get("validation_predictions") or []
+        test_predictions = report.get("test_predictions") or []
+
+        def at_gate(predictions, fallback):
+            """Recompute at the gate in force now, not the one used at training time."""
+            if not predictions:
+                return fallback
+            return metrics(
+                [int(r["label"] == "self") for r in predictions],
+                [r["score"] for r in predictions],
+                current,
+            )
+
+        validation_metrics = at_gate(validation_predictions, stored_selection.get("validation") or report["test"])
+        test_metrics = at_gate(test_predictions, report["test"])
+        suggestion = None
+        sweep_rows = []
+        if validation_predictions:
+            labels = [int(r["label"] == "self") for r in validation_predictions]
+            scores = [r["score"] for r in validation_predictions]
+            suggestion = suggest_threshold(labels, scores)
+            sweep_rows = sweep(labels, scores)
         summary = {
             k: v for k, v in report.items() if k not in {"history", "test_predictions", "validation_predictions"}
         }
@@ -398,8 +464,10 @@ class CharacterRecognition(MaiBotPlugin):
             if not report["comparable_to_previous"]
             else "留出真值及成员未改变"
         )
+        summary["当前判定阈值"] = current
+        summary["训练时评测阈值"] = selection_threshold
         rows = []
-        for name, m in (("验证", report["selection"]["validation"]), ("测试", report["test"])):
+        for name, m in (("验证", validation_metrics), ("测试", test_metrics)):
             rows.append(
                 {
                     "split": name,
@@ -410,18 +478,41 @@ class CharacterRecognition(MaiBotPlugin):
                     "count": m["count"],
                     "balanced_accuracy": m["balanced_accuracy"],
                     "other_recall": m["other_recall"],
+                    # Numeric copies for the WebUI comparison view: the formatted
+                    # strings above cannot be diffed (parseFloat("12/15 = 80.0%") = 12).
+                    "precision_value": round(m["precision"], 6),
+                    "recall_value": round(m["recall"], 6),
+                    "f1_value": round(m["f1"], 6),
+                    "accuracy_value": round(m["accuracy"], 6),
+                    "other_recall_value": round(m["other_recall"], 6),
+                    "balanced_accuracy_value": round(m["balanced_accuracy"], 6),
+                    "threshold": f"{current:.2f}",
+                    "threshold_value": current,
                     "matrix": f"真“非{character}” → 非{character}/是{character}：{m['confusion_matrix'][0][0]}/{m['confusion_matrix'][0][1]}；真“{character}” → 非{character}/是{character}：{m['confusion_matrix'][1][0]}/{m['confusion_matrix'][1][1]}",
                 }
             )
         readable = (
-            f"角色「{character}」 · 所选第{report['selection']['epoch']}轮 · 总用时{report['total_seconds']:.1f}秒"
+            f"角色「{character}」 · 所选第{stored_selection['epoch']}轮 · 总用时{report['total_seconds']:.1f}秒"
             f" · 训练（含验证）{report['training_seconds_including_validation']:.1f}秒\n{summary['评测性质']} · {summary['比较提示']}\n"
+            f"指标按当前判定阈值 {current:.2f} 重算（训练时评测口径 {selection_threshold:.2f}）\n"
             f"核验：{'通过' if report['audit']['passed'] else '未通过'}"
         )
         for row_ in rows:
             for field in ("recall", "f1", "accuracy", "other_recall", "balanced_accuracy"):
                 row_[field] = f"{row_[field]:.1%}"
-        return {"summary": readable, "metrics": rows, "technical": json.dumps(summary, ensure_ascii=False)}
+        return {
+            "summary": readable,
+            "metrics": rows,
+            "technical": json.dumps(summary, ensure_ascii=False),
+            "threshold": {
+                "current": current,
+                "default": DEFAULT_THRESHOLD,
+                "selection": selection_threshold,
+                "band": JUDGMENT_BAND,
+                "suggested": suggestion,
+                "sweep": sweep_rows,
+            },
+        }
 
     @API("self_models", version="1")
     async def versions(self, character: str = "") -> dict:
@@ -451,7 +542,34 @@ class CharacterRecognition(MaiBotPlugin):
             "active": next((r["name"] for r in rows if r["id"] == active), "未启用"),
             "can_rollback": bool(previous),
             "rollback_text": next(("回退目标：" + r["name"] for r in rows if r["id"] == previous), "无可回退版本"),
+            "threshold": await offload(self.service.store.threshold, character),
+            "threshold_default": DEFAULT_THRESHOLD,
         }
+
+    @API("self_threshold_apply", version="1")
+    async def apply_threshold(self, character: str = "", value: str = "") -> dict:
+        """Set the per-character online gate. Model weights are untouched."""
+        try:
+            character = self._validate_character(character)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        try:
+            number = float(str(value).strip())
+        except (TypeError, ValueError):
+            return {"success": False, "error": "阈值必须是 0.05 到 0.95 之间的数字"}
+        try:
+            result = await offload(self.service.store.set_threshold, character, number)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return {**result, "success": True}
+
+    @API("self_threshold_reset", version="1")
+    async def reset_threshold(self, character: str = "") -> dict:
+        try:
+            character = self._validate_character(character)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return {**await offload(self.service.store.clear_threshold, character), "success": True}
 
     @API("self_model_activate", version="1")
     async def activate(self, version: str) -> dict:
@@ -506,8 +624,10 @@ class CharacterRecognition(MaiBotPlugin):
         hits = [r for r in result.get("results", []) if r.get("status") == "ok"]
         if hits:
             result["summary"] = "；".join(
-                f"{r['character']} · 得分 {r['score']:.3f}（{r['judgment']}）" for r in hits
-            ) or "无启用角色模型"
+                f"{r['character']} · 得分 {r['score']:.3f}（{r['judgment']} · 阈值 {r.get('threshold', DEFAULT_THRESHOLD):.2f}）"
+                for r in hits
+            )
+            result.update(select_top(hits, {}))
         else:
             result["summary"] = f"识别未完成：{result.get('error') or result.get('status')}"
         result["version_text"] = "模型版本：" + "；".join(f"{r['character']}:{r.get('version', '')[:8]}" for r in hits)
@@ -587,7 +707,9 @@ class CharacterRecognition(MaiBotPlugin):
         result = await offload(self.service.infer, raw, 8, character)
         if character and result.get("results"):
             result = {**result, "results": [r for r in result["results"] if r.get("character") == character]}
-        return self._tool_result(result)
+        # Keep every score for debugging; add the same aggregation the prompt path
+        # uses so the model can tell "one clear answer" from "too close to call".
+        return self._tool_result({**result, **select_top(result.get("results", []), {})})
 
 
 def create_plugin() -> CharacterRecognition:

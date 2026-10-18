@@ -62,14 +62,14 @@
     <div class="split"><aside class="card maibot-card"><div class="panel-title"><h3>新训练任务</h3><p class="hint">训练数据会在开始时冻结为快照。</p></div><div id="readiness" class="readiness maibot-inset">正在检查数据…</div><div class="field"><label>训练模式</label><div class="segmented" id="mode-buttons"><button aria-pressed="true" class="maibot-button" data-mode="incremental">增量训练</button><button class="maibot-button" data-mode="fresh">从头训练</button></div><p class="hint">增量继承当前模型；仅训练新增或标签已修改的图片。</p></div><div class="field"><label>训练设备</label><div class="segmented" id="device-buttons"><button aria-pressed="true" class="maibot-button" data-device="cpu">CPU</button><button class="maibot-button" data-device="cuda">CUDA</button></div><p id="training-reason" class="hint">正在检查运行环境…</p></div><div class="field"><label for="input-size">输入尺寸</label><select id="input-size" class="maibot-select"><option value="224">224×224</option><option value="320" selected>320×320</option><option value="448">448×448</option></select></div><button id="start-training" disabled class="maibot-button full maibot-button-primary" data-action="submit">开始训练</button><p class="hint">每次运行一个任务，中断后可手动重试。</p></aside><div><div class="card maibot-card"><div class="card-head"><div><h3>任务记录</h3><p>运行期间每 5 秒更新状态</p></div><span class="badge maibot-badge" id="job-count">—</span></div><div id="job-list">正在读取任务…</div></div><div class="card report maibot-card"><div class="card-head"><div><h3>评测报告</h3></div><select class="maibot-select" id="report-select" aria-label="选择任务报告"><option value="">选择已完成任务</option></select><select class="maibot-select" id="report-compare-select" aria-label="选择对比任务"><option value="">不对比</option></select></div><div id="report-content" class="muted">尚未选择报告。</div></div></div></div>
   </section>
   <section class="section" id="models" role="region" aria-label="模型版本" hidden>
-    <div class="intro row between"><button class="maibot-button" id="rollback" disabled data-action="rollback">回退上一版本</button></div><p id="rollback-text" class="notice">正在读取版本信息…</p><div id="version-list" class="versions"></div>
+    <div class="intro row between"><button class="maibot-button" id="rollback" disabled data-action="rollback">回退上一版本</button></div><p id="rollback-text" class="notice">正在读取版本信息…</p><p id="threshold-note" class="hint"></p><div id="version-list" class="versions"></div>
   </section>
   <section class="section" id="test" role="region" aria-label="识别测试" hidden>
     <div class="intro row between"><button class="maibot-button maibot-button-primary" data-open-upload="recognition">＋ 选择测试图片</button></div><div id="test-results" class="gallery"></div>
   </section>
   <section class="section" id="environment" role="region" aria-label="运行环境" hidden>
     <div class="stats"><div class="stat maibot-card"><p class="label">环境模式</p><div class="number" id="env-mode" style="font-size:22px">—</div></div><div class="stat maibot-card"><p class="label">PyTorch</p><div class="number" id="env-dependency" style="font-size:22px">—</div></div><div class="stat maibot-card"><p class="label">GPU 训练</p><div class="number" id="env-cuda" style="font-size:22px">—</div></div></div>
-    <div class="env-grid"><div class="card maibot-card"><div class="card-head"><div><h3>当前环境</h3></div></div><dl class="info-list" id="env-info"></dl><p class="hint" id="env-guide"></p></div><div class="card maibot-card"><div class="card-head"><div><h3>环境与依赖管理</h3></div></div><div class="env-action"><div class="row between"><h3>Python 环境</h3></div><div class="row" style="margin-top:12px"><button class="maibot-button" id="env-host" disabled data-env-mode="host">共享覆盖层</button><button class="maibot-button" id="env-private" disabled data-env-mode="custom">自定义环境</button></div></div><div class="env-action" id="dependency-controls"><h3>PyTorch 依赖</h3><div class="row" style="margin-top:12px"><button class="maibot-button" id="env-cpu" disabled data-env-kind="cpu">CPU 版本</button><button class="maibot-button" id="env-gpu" disabled data-env-kind="gpu">GPU 版本</button></div></div><div class="env-action row between"><div><h3>推理服务</h3><p>已停止后需手动开启或重新加载插件。</p></div><div class="row"><button class="maibot-button" id="start-inference" disabled data-action="start">开启推理</button><button class="maibot-button" id="stop-inference" disabled data-action="stop">停止推理</button></div></div></div></div>
+    <div class="env-grid"><div class="card maibot-card"><div class="card-head"><div><h3>当前环境</h3></div></div><dl class="info-list" id="env-info"></dl><p class="hint" id="env-guide"></p></div><div class="card maibot-card"><div class="card-head"><div><h3>环境与依赖管理</h3></div></div><div class="env-action"><div class="row between"><h3>Python 环境</h3></div><div class="row" style="margin-top:12px"><button class="maibot-button" id="env-host" disabled data-env-mode="host">共享覆盖层</button><button class="maibot-button" id="env-private" disabled data-env-mode="custom">自定义环境</button></div></div><div class="env-action" id="dependency-controls"><h3>PyTorch 依赖</h3><div class="row" style="margin-top:12px"><button class="maibot-button" id="env-cpu" disabled data-env-kind="cpu">CPU 版本</button><button class="maibot-button" id="env-gpu" disabled data-env-kind="gpu">GPU 版本</button></div></div><div class="env-action row between"><div><h3>推理服务</h3><p id="inference-note">正在读取推理状态…</p></div><div class="row"><button class="maibot-button" id="start-inference" disabled data-action="start">开启推理</button><button class="maibot-button" id="stop-inference" disabled data-action="stop">停止推理</button></div></div></div></div>
     <div class="card maibot-card" id="dependency-log" style="margin-top:18px"><div class="card-head"><div><h3>安装任务与日志</h3><p id="env-operation">—</p></div><div class="row"><button class="maibot-button small" id="copy-env-log">复制日志</button><span class="badge maibot-badge" id="env-operation-state">—</span></div></div><p id="dependency-progress-text" class="hint"></p><progress id="dependency-progress" max="100" aria-label="依赖安装进度"></progress><pre id="env-log" class="log maibot-inset" tabindex="0" aria-label="安装日志">正在读取日志…</pre></div>
   </section>
   <footer class="footer"><span></span><span id="updated-at">等待首次加载</span></footer>
@@ -222,7 +222,7 @@ function renderTraining() {
     if (inputSize === null) inputSize = data.form.input_size ?? 320;
     $('input-size').value = String(inputSize);
     const {self,other} = data.form.groups;
-    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="20" value="${Math.min(self,other,20)}" aria-label="训练数据准备程度"></progress><p class="hint">${escape(data.form.summary)}</p><p class="hint">待训练 ${data.form.pending_count ?? 0} 张</p>`;
+    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="20" value="${Math.min(self,other,20)}" aria-label="训练数据准备程度"></progress><p class="hint">${escape(data.form.summary)}</p><p class="hint">待训练 ${data.form.pending_count ?? 0} 张 · 当前判定阈值 ${(data.form.threshold ?? 0.6).toFixed(2)}</p>`;
   }
   const env = data.env, form = data.form;
   if (!deviceChosen && env?.installed && !env.detecting) {
@@ -261,12 +261,39 @@ function reportDelta(primary, secondary) {
   const a = primary?.metrics?.find(row => row.split === '测试'), b = secondary?.metrics?.find(row => row.split === '测试');
   if (!a || !b) return '';
   const parts = [['精确率','precision'],['召回率','recall'],['F1','f1'],['准确率','accuracy']].map(([label,key]) => {
-    const x = parseFloat(a[key]), y = parseFloat(b[key]);
-    if (Number.isNaN(x) || Number.isNaN(y)) return '';
-    const diff = y - x;
-    return `<span>${label} <b class="${diff > 0 ? 'up' : diff < 0 ? 'down' : ''}">${diff > 0 ? '+' : ''}${diff.toFixed(1)}</b></span>`;
+    // The display strings are "12/15 = 80.0%" for precision and "80.0%" elsewhere;
+    // diffing them needs the numeric copy the backend now returns.
+    const x = a[`${key}_value`], y = b[`${key}_value`];
+    if (typeof x !== 'number' || typeof y !== 'number') return '';
+    const diff = (y - x) * 100;
+    return `<span>${label} <b class="${diff > 0 ? 'up' : diff < 0 ? 'down' : ''}">${diff > 0 ? '+' : ''}${diff.toFixed(1)}</b> 个百分点</span>`;
   }).filter(Boolean);
   return parts.length ? `<div class="report-delta row">对比（对比任务 − 当前任务）：${parts.join(' · ')}</div>` : '';
+}
+function thresholdPanel(t) {
+  if (!t) return '';
+  const s = t.suggested;
+  const percent = value => `${(value * 100).toFixed(1)}%`;
+  // Never print a bare "90% precise": 3/3 on a tiny validation split is not that.
+  const support = s
+    ? `验证集 ${s.count} 张（正例 ${s.positive} / 负例 ${s.negative}）· 精确率 ${s.precision_numerator}/${s.precision_denominator} · 95%置信下限 ${percent(s.confidence_lower)}`
+      + (s.reliable ? '' : ' · 样本不足，仅供参考')
+      + (s.target_met ? '' : ` · 验证集上无法达到 ${percent(s.target_precision)} 精确率`)
+    : '该报告不含验证集预测，无法计算建议值';
+  const rows = (t.sweep || []).map(row =>
+    `<tr${s && Math.abs(row.threshold - s.value) < 1e-9 ? ' style="font-weight:600"' : ''}><td>${row.threshold.toFixed(2)}</td><td>${row.precision_numerator}/${row.precision_denominator}</td><td>${percent(row.precision)}</td><td>${percent(row.recall)}</td><td>${percent(row.f1)}</td></tr>`
+  ).join('');
+  return `<div class="maibot-inset" style="margin:18px 0;padding:16px">
+    <div class="row between"><h3>判定阈值</h3><span class="hint" style="margin:0">当前 <b>${t.current.toFixed(2)}</b> · 训练时评测 <b>${t.selection.toFixed(2)}</b> · 不确定区间 ${(t.current - t.band).toFixed(2)}–${t.current.toFixed(2)}</span></div>
+    <p class="hint">${escape(support)}</p>
+    <div class="row" style="margin-top:10px">
+      ${s ? `<button class="maibot-button small maibot-button-primary" data-threshold-apply="${s.value}">采纳建议 ${s.value.toFixed(2)}</button>` : ''}
+      <input class="maibot-input" id="threshold-manual" type="number" min="0.05" max="0.95" step="0.01" value="${t.current.toFixed(2)}" aria-label="手动判定阈值" style="width:96px">
+      <button class="maibot-button small" data-threshold-manual>应用手动值</button>
+      <button class="maibot-button small" data-threshold-reset>恢复默认 ${t.default.toFixed(2)}</button>
+    </div>
+    ${rows ? `<details class="technical"><summary>阈值扫描（验证集）</summary><div class="table-wrap"><table class="maibot-table"><thead><tr><th>阈值</th><th>预测为是</th><th>精确率</th><th>召回</th><th>F1</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : ''}
+  </div>`;
 }
 function renderReport() {
   if (!reportJob || !data.report) { $('report-content').innerHTML = empty('选择一份报告','核对精确率、召回率和错判图片，再决定是否启用模型。'); return; }
@@ -282,6 +309,7 @@ function renderReport() {
   } else {
     html += reportTable(metrics);
   }
+  html += thresholdPanel(report.threshold);
   html += `<button class="maibot-button" style="margin-top:16px" data-errors="${escape(reportJob)}">查看错判</button>`;
   if (report.technical) html += `<details class="technical" ${open ? 'open' : ''}><summary>技术明细</summary><pre class="log maibot-inset">${escape(report.technical)}</pre></details>`;
   $('report-content').innerHTML = html;
@@ -290,6 +318,7 @@ function renderModels() {
   if (!data.versions) return;
   $('rollback').disabled = busy || !data.versions.can_rollback;
   $('rollback-text').textContent = data.versions.rollback_text;
+  $('threshold-note').textContent = `当前判定阈值 ${(data.versions.threshold ?? 0.6).toFixed(2)} · 报告指标按该阈值重算，版本卡片里的数字是训练时 0.50 口径`;
   $('version-list').innerHTML = data.versions.rows.length ? data.versions.rows.map(row => `<article class="version ${row.status === '使用中' ? 'active' : ''} maibot-card"><div class="row between"><h3>${escape(row.name)}</h3>${badge(`${row.input_size}×${row.input_size}`)}${badge(row.status,row.status === '使用中' ? 'good' : '')}</div><p class="mono">${escape(row.id)}</p><p>验证集 · ${escape(row.validation_text)}</p><p>测试集 · ${escape(row.test_text)}</p><div class="row">${button(row.can_activate ? '启用此版本' : '当前使用中',`data-version="${escape(row.id)}"`,busy || !row.can_activate,row.can_activate ? 'primary' : '')}${button('查看报告',`data-report="${escape(row.job_id)}"`)}${button('查看错判',`data-errors="${escape(row.job_id)}"`)}</div></article>`).join('') : empty('尚无已训练版本','完成训练与核验后，新版本会出现在这里。');
 }
 function renderTests() {
@@ -305,11 +334,12 @@ function renderEnvironment() {
   $('dependency-progress-text').textContent = env.progress_text;
   if (env.progress_percent == null) $('dependency-progress').removeAttribute('value'); else $('dependency-progress').value = env.progress_percent;
   $('dependency-progress').hidden = !env.progress_running && env.progress_percent == null;
-  $('start-inference').hidden = env.inference_enabled;
-  $('stop-inference').hidden = !env.inference_enabled;
+  $('start-inference').hidden = !env.can_start_inference;
+  $('stop-inference').hidden = !env.can_stop_inference;
+  $('inference-note').textContent = `${env.inference_state_text} · ${env.inference_note}`;
   for (const [id,key] of [['env-mode','mode_text'],['env-dependency','dependency_text'],['env-cuda','cuda_text'],['env-guide','guide'],['env-operation','operation_detail'],['env-operation-state','operation_status']]) $(id).textContent = env[key];
   $('env-info').innerHTML = [['Python',env.python_path],['依赖目录',env.dependency_path],['版本',env.version_text],['实际来源',env.source_text]].map(([key,value]) => `<dt>${key}</dt><dd class="mono">${escape(value)}</dd>`).join('');
-  for (const [id,label,allowed] of [['env-host',env.host_label,env.can_use_host],['env-private',env.private_label,env.can_use_private],['env-cpu',env.cpu_label,env.can_manage],['env-gpu',env.gpu_label,env.can_manage],['start-inference','开启推理',!env.inference_running],['stop-inference','停止推理',env.inference_enabled]]) { $(id).textContent = label; $(id).disabled = busy || !allowed; $(id).title = allowed ? '' : env.usage_text; }
+  for (const [id,label,allowed] of [['env-host',env.host_label,env.can_use_host],['env-private',env.private_label,env.can_use_private],['env-cpu',env.cpu_label,env.can_manage],['env-gpu',env.gpu_label,env.can_manage],['start-inference','开启推理',env.can_start_inference],['stop-inference','停止推理',env.can_stop_inference]]) { $(id).textContent = label; $(id).disabled = busy || !allowed; $(id).title = allowed ? '' : env.usage_text; }
   const log = $('env-log'), bottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30, scroll = log.scrollTop;
   if (log.textContent !== env.log) { log.textContent = env.log; log.scrollTop = bottom ? log.scrollHeight : scroll; }
 }
@@ -332,7 +362,7 @@ document.addEventListener('click', event => {
   if (node.dataset.device) { deviceChosen = true; device = node.dataset.device; for (const item of document.querySelectorAll('[data-device]')) item.setAttribute('aria-pressed',String(item.dataset.device === device)); renderTraining(); }
   if (node.dataset.imageLabel) void operate('label',{ image_id:node.dataset.id,label:node.dataset.imageLabel },'图片身份已更新');
   if (node.dataset.imageAction) void operate(node.dataset.imageAction,{ image_id:node.dataset.id },'图片库已更新');
-  if (node.dataset.batch && selected.size) void operate(node.dataset.batch,{ image_ids:JSON.stringify([...selected]) },'批量操作已完成');
+  if (node.dataset.batch && selected.size) void operate(node.dataset.batch,{ image_ids:[...selected].join(',') },'批量操作已完成');
   if (node.dataset.jobAction) void operate(node.dataset.jobAction,{ job_id:node.dataset.id });
   if (node.dataset.report) { reportJob = node.dataset.report; data.report = null; showSection('training'); }
   if (node.dataset.errors) { errorJob = node.dataset.errors; filter = 'errors'; page = 1; generation++; picturesLoading = true; showSection('images'); }
@@ -343,7 +373,11 @@ document.addEventListener('click', event => {
   if (node.dataset.retest) void operate('test_upload',{upload_id:'',result_id:node.dataset.retest},'识别已更新');
   if (node.dataset.action === 'submit' && data.form) void operate('submit',{ request_key:data.form.request_key,character,mode,device,input_size:inputSize ?? 320 },'训练任务已提交');
   if (node.dataset.action === 'rollback') void operate('rollback', { character });
-  if (['remove_all','stop','start'].includes(node.dataset.action)) void operate(node.dataset.action);
+  if (node.dataset.action === 'remove_all') void operate('remove_all', { character });
+  if (node.dataset.thresholdApply !== undefined && node.dataset.thresholdApply !== '') void operate('apply_threshold',{ character, value:node.dataset.thresholdApply },'判定阈值已更新');
+  if (node.dataset.thresholdManual !== undefined) void operate('apply_threshold',{ character, value:$('threshold-manual').value },'判定阈值已更新');
+  if (node.dataset.thresholdReset !== undefined) void operate('reset_threshold',{ character },'判定阈值已恢复默认');
+  if (['stop','start'].includes(node.dataset.action)) void operate(node.dataset.action);
   if (node.dataset.openUpload) openUpload(node.dataset.openUpload);
   if (node.dataset.uploadLabel && !uploadRunning) { uploadLabel = node.dataset.uploadLabel; for (const item of document.querySelectorAll('[data-upload-label]')) item.setAttribute('aria-pressed',String(item.dataset.uploadLabel === uploadLabel)); }
   if (node.dataset.removeFile !== undefined && !uploadRunning) { const row = uploadRows.splice(Number(node.dataset.removeFile),1)[0]; URL.revokeObjectURL(row.preview); renderUpload(); }
@@ -353,7 +387,16 @@ document.addEventListener('change', event => {
   if (node.dataset.selectImage) { if (node.checked) selectionAdd(node.dataset.selectImage); else selected.delete(node.dataset.selectImage); updateSelection(); }
 });
 $('image-filter').onchange = event => { filter = event.target.value; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
-$('character-select').onchange = event => { character = event.target.value; data.form = null; data.versions = null; data.report = null; data.compareReport = null; generation++; picturesLoading = true; render(); void load(); };
+$('character-select').onchange = event => {
+  character = event.target.value;
+  // Selection, report and error-filter state all belong to the previous character:
+  // keeping them would let a batch delete touch another character's images.
+  selected.clear();
+  filter = 'all'; errorJob = ''; reportJob = ''; compareJob = ''; page = 1;
+  data.form = data.versions = data.report = data.compareReport = data.pictures = null;
+  generation++; picturesLoading = true;
+  render(); void load();
+};
 $('return-library').onclick = () => { filter = 'all'; errorJob = ''; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
 $('previous-page').onclick = () => { page = Math.max(1, page - 1); generation++; picturesLoading = true; renderImages(); void load(); };
 $('next-page').onclick = () => { page++; generation++; picturesLoading = true; renderImages(); void load(); };
@@ -385,7 +428,7 @@ function addFiles(files) {
   if (uploadRunning) return;
   if (uploadRows.length + files.length > 100) { notice('一次最多选择 100 个文件，请分批上传。','error'); return; }
   for (const file of files) {
-    if (!['image/jpeg','image/png','image/webp'].includes(file.type) || file.size > 64 * 1024 * 1024 || file.size === 0) { notice(`${file.name}：请选择不超过 64 MiB 的 JPEG、PNG 或静态 WebP。`,'error'); continue; }
+    if (!['image/jpeg','image/png','image/webp'].includes(file.type) || file.size > 20 * 1024 * 1024 || file.size === 0) { notice(`${file.name}：请选择不超过 20 MiB 的 JPEG、PNG 或静态 WebP。`,'error'); continue; }
     uploadRows.push({file,preview:URL.createObjectURL(file),phase:'waiting',percent:0,message:''});
   }
   renderUpload();

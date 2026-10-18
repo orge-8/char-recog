@@ -134,8 +134,19 @@ def migrate(source: Path, target: Path, character: str, dry_run: bool = False) -
                 (job, job, actual_sha, metrics, created, character),
             )
             db.execute(
-                "INSERT OR REPLACE INTO jobs VALUES (?,?,COALESCE((SELECT state FROM jobs WHERE id=?),'complete'),NULL,'',?,?,?)",
-                (job, f"migrated-{job[:12]}", job, created, snapshot_sha, character),
+                "INSERT OR REPLACE INTO jobs "
+                "(id,request_key,state,pid,error,created,snapshot_sha,character,device,input_size) "
+                "VALUES (?,?,COALESCE((SELECT state FROM jobs WHERE id=?),'complete'),NULL,'',?,?,?,?,?)",
+                (
+                    job,
+                    f"migrated-{job[:12]}",
+                    job,
+                    created,
+                    snapshot_sha,
+                    character,
+                    (snapshot or {}).get("device", ""),
+                    (snapshot or {}).get("input_size", 320),
+                ),
             )
 
         # 3. Settings: active / previous / held-truth per character.

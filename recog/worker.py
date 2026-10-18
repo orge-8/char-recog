@@ -11,7 +11,8 @@ import time
 import traceback
 
 from .store import Store, atomic_json, digest
-from .images import judgment
+from .images import MAX_EDGE, decode
+from .scores import DEFAULT_THRESHOLD, judgment
 
 
 def train_job(root: Path, job_id: str) -> None:
@@ -33,8 +34,9 @@ def train_job(root: Path, job_id: str) -> None:
     try:
         with store.db() as db:
             db.execute(
-                "UPDATE jobs SET state=CASE WHEN state='queued' THEN 'running' ELSE state END,pid=? WHERE id=?",
-                (os.getpid(), job_id),
+                "UPDATE jobs SET state=CASE WHEN state='queued' THEN 'running' ELSE state END,pid=?,"
+                " device=COALESCE(NULLIF(device,''),?), input_size=COALESCE(input_size,?) WHERE id=?",
+                (os.getpid(), snapshot.get("device", ""), snapshot.get("input_size", 320), job_id),
             )
         if cancelled():
             raise InterruptedError("训练已取消")
@@ -87,9 +89,11 @@ def train_job(root: Path, job_id: str) -> None:
 
 def serve(root: Path) -> None:
     import torch
-    from .model import loaded_model, infer
+    from .model import loaded_model, score_tensor, tensor_for_image
 
-    torch.set_num_threads(min(4, torch.get_num_threads()))
+    default_threads = min(4, torch.get_num_threads())
+    torch.set_num_threads(default_threads)
+    current_threads = default_threads
     store = Store(root)
     loaded = {}  # character -> (version, model)
 
@@ -108,7 +112,19 @@ def serve(root: Path) -> None:
     for line in sys.stdin:
         try:
             request = json.loads(line)
-            if request.get("operation") == "load":
+            operation = request.get("operation")
+            if operation == "ping":
+                # Readiness handshake; the host uses it to bound cold start.
+                result = {"status": "ready", "threads": current_threads, "default_threads": default_threads}
+            elif operation == "threads":
+                # Training is CPU hungry: lend threads back while it runs.
+                value = int(request.get("value") or 0)
+                target = default_threads if value <= 0 else max(1, min(default_threads, value))
+                if target != current_threads:
+                    torch.set_num_threads(target)
+                    current_threads = target
+                result = {"status": "ok", "threads": current_threads}
+            elif operation == "load":
                 character = Store.validate_character(request.get("character", ""))
                 version = request.get("version") or store.active(character)
                 if not version:
@@ -125,6 +141,18 @@ def serve(root: Path) -> None:
                 raw = base64.b64decode(request["image"], validate=True)
                 requested = request.get("character", "")
                 targets = [Store.validate_character(requested)] if requested else store.active_characters()
+                try:
+                    # Read the gates per request: an admin change must apply to the
+                    # very next image, and a read failure must not kill inference.
+                    limits = store.thresholds()
+                except Exception:
+                    limits = {}
+                # Decode once per request, then letterbox once per input size:
+                # N characters used to pay N full PIL decodes of the same image.
+                # Draft at the largest supported input size: models may mix 224/
+                # 320/448, and `draft` returns at least the requested edge.
+                image = decode(raw, MAX_EDGE)
+                tensors = {}
                 results = []
                 for character in targets:
                     version = store.active(character)
@@ -134,15 +162,21 @@ def serve(root: Path) -> None:
                         if loaded.get(character, ("", None))[0] != version:
                             load(character, version)
                         _, model = loaded[character]
-                        score = infer(model, raw)
+                        size = model.input_size
+                        tensor = tensors.get(size)
+                        if tensor is None:
+                            tensor = tensors[size] = tensor_for_image(image, size)
+                        score = score_tensor(model, tensor)
+                        limit = limits.get(character, DEFAULT_THRESHOLD)
                         results.append(
                             {
                                 "status": "ok",
                                 "character": character,
                                 "version": version,
-                                "input_size": model.input_size,
+                                "input_size": size,
                                 "score": score,
-                                "judgment": judgment(score),
+                                "threshold": limit,
+                                "judgment": judgment(score, limit),
                                 "score_is_calibrated_probability": False,
                             }
                         )

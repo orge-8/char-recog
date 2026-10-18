@@ -100,6 +100,61 @@ def test_decode_and_letterbox():
         decode(buffer.getvalue())
 
 
+def test_decode_draft_uses_a_reduced_scale_but_keeps_geometry():
+    import recog.images as images
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1200, 900), "red").save(buffer, "JPEG")
+    raw = buffer.getvalue()
+    assert decode(raw).size == (1200, 900)
+    # 1200/2 = 600 still covers 320, so libjpeg decodes at 1/2 scale.
+    assert decode(raw, 320).size == (600, 450)
+    assert decode(raw, 448).size == (600, 450)
+
+    png = io.BytesIO()
+    Image.new("RGB", (1200, 900), "red").save(png, "PNG")
+    assert decode(png.getvalue(), 320).size == (1200, 900), "非 JPEG 忽略 draft"
+
+    assert images.MAX_EDGE == 448
+
+
+def test_pixel_guard_runs_before_draft(monkeypatch):
+    """draft() rewrites size immediately; the guard must use the original."""
+    import recog.images as images
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1200, 900), "red").save(buffer, "JPEG")
+    raw = buffer.getvalue()
+    monkeypatch.setattr(images, "MAX_PIXELS", 1_000_000)
+    with pytest.raises(ValueError, match="4000万像素"):
+        decode(raw, 320)
+
+
+def test_ingest_keeps_the_full_resolution_for_fingerprints(tmp_path):
+    """The dedupe hash covers full-size pixels, so ingest must never draft."""
+    store = Store(tmp_path)
+    path = store.root / "uploads" / "large.png"
+    Image.new("RGB", (1200, 900), "orange").save(path)
+    ident = store.ingest(path, "self", CHAR)["id"]
+    with store.db() as db:
+        row = db.execute("SELECT width, height FROM images WHERE id=?", (ident,)).fetchone()
+    assert (row["width"], row["height"]) == (1200, 900)
+
+
+def test_decode_names_the_detected_format():
+    """A real library had 32% rejected with a message that did not say what it found."""
+    unsupported = io.BytesIO()
+    Image.new("RGB", (16, 24), "red").save(unsupported, format="BMP")
+    with pytest.raises(ValueError, match="BMP"):
+        decode(unsupported.getvalue())
+
+    animated = io.BytesIO()
+    frames = [Image.new("RGB", (8, 8), "red"), Image.new("RGB", (8, 8), "blue")]
+    frames[0].save(animated, format="GIF", save_all=True, append_images=frames[1:])
+    with pytest.raises(ValueError, match="动图"):
+        decode(animated.getvalue())
+
+
 @pytest.mark.parametrize(
     "score,expected",
     [
@@ -197,8 +252,41 @@ def test_batch_across_pages_atomic_and_remove_all(tmp_path):
         assert db.execute("SELECT label FROM images WHERE id=?", (first,)).fetchone()[0] == "other"
     store.batch_update(f"{first},{second}", "remove")
     assert store.images(character=CHAR)["total"] == 38
-    assert store.batch_update("", "remove_all")["updated"] == 38
+    assert store.batch_update("", "remove_all", CHAR)["updated"] == 38
     assert store.images(character=CHAR)["total"] == 0
     assert store.images(view="removed", character=CHAR)["total"] == 40
     store.set_removed(first, False)
     assert store.images(character=CHAR)["total"] == 1
+
+
+def test_batch_accepts_csv_and_json_array(tmp_path):
+    """0.3.3 pages sent JSON arrays; the backend must accept both shapes."""
+    store = corpus(tmp_path)
+    first = store.images(1, character=CHAR)["rows"][0]["id"]
+    second = store.images(1, character=CHAR)["rows"][1]["id"]
+    assert store.batch_update(f"{first},{second}", "other")["updated"] == 2
+    assert store.batch_update(f'["{first}", "{second}"]', "self")["updated"] == 2
+    with store.db() as db:
+        assert db.execute("SELECT label FROM images WHERE id=?", (first,)).fetchone()[0] == "self"
+    with pytest.raises(ValueError, match="请先选择图片"):
+        store.batch_update("", "self")
+    with pytest.raises(ValueError, match="无效图片ID"):
+        store.batch_update("[bad", "self")
+    with pytest.raises(ValueError, match="无效图片ID"):
+        store.batch_update(f"{first},nothex", "self")
+
+
+def test_remove_all_is_scoped_to_character(tmp_path):
+    store = corpus(tmp_path)
+    other = "言和"
+    for seed in range(100, 103):
+        image = Image.fromarray(np.random.default_rng(seed).integers(0, 256, (96, 120, 3), dtype=np.uint8))
+        path = store.root / "uploads" / f"other-{seed}.png"
+        image.save(path)
+        store.ingest(path, "self", other)
+    assert store.images(character=other)["total"] == 3
+    assert store.batch_update("", "remove_all", CHAR)["updated"] == 40
+    assert store.images(character=CHAR)["total"] == 0
+    assert store.images(character=other)["total"] == 3, "其他角色的图库不能被牵连"
+    with pytest.raises(ValueError, match="缺少角色名"):
+        store.batch_update("", "remove_all", "")

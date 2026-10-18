@@ -24,7 +24,7 @@ def instance(message, model_status="ok"):
     plugin._ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=AsyncMock(return_value=message)))
     seen = []
     plugin.service = SimpleNamespace(
-        infer=lambda raw, timeout=8, character="": seen.append(raw) or {"status": model_status, "judgment": "不确定"}
+        infer=lambda raw, timeout=8, character="", *, wait=True: seen.append(raw) or {"status": model_status, "judgment": "不确定"}
     )
     return plugin, seen
 
@@ -158,7 +158,7 @@ def test_automatic_media_annotations_cache_and_model_switch():
     version = ["first"]
     seen = []
 
-    def infer(raw, timeout):
+    def infer(raw, timeout, character="", *, wait=False):
         seen.append(raw)
         return {
             "status": "ok",
@@ -171,7 +171,9 @@ def test_automatic_media_annotations_cache_and_model_switch():
         }
 
     plugin.service = SimpleNamespace(
-        store=SimpleNamespace(active_characters=lambda: ["洛天依"], active=lambda c: version[0]),
+        store=SimpleNamespace(
+            active_characters=lambda: ["洛天依"], active=lambda c: version[0], thresholds=lambda: {}
+        ),
         infer=infer,
         inference_enabled=True,
     )
@@ -219,7 +221,7 @@ def test_test_image_reidentify_and_expiry(tmp_path):
     calls = []
     plugin.service = SimpleNamespace(
         store=Store(tmp_path),
-        infer=lambda raw, timeout=8, character="": calls.append(raw) or {"status": "ok", "version": str(len(calls)), "score": 0.8},
+        infer=lambda raw, timeout=8, character="", *, wait=True: calls.append(raw) or {"status": "ok", "version": str(len(calls)), "score": 0.8},
     )
     data = io.BytesIO()
     Image.new("RGB",(20,30),"orange").save(data,format="PNG")
@@ -235,3 +237,65 @@ def test_test_image_reidentify_and_expiry(tmp_path):
     assert not (tmp_path/"test-images"/(first["id"]+".image")).exists()
     with pytest.raises(ValueError,match="过期"):
         plugin.read_test_image(first["id"])
+
+
+def test_remove_all_forwards_character():
+    from recog.store import Store
+
+    plugin = module.create_plugin()
+    calls = []
+    plugin.service = SimpleNamespace(
+        store=SimpleNamespace(
+            validate_character=Store.validate_character,
+            batch_update=lambda ids, operation, character="": calls.append((ids, operation, character))
+            or {"updated": 1},
+        )
+    )
+    assert asyncio.run(plugin.remove_all_images("洛天依")) == {"updated": 1}
+    assert calls == [("", "remove_all", "洛天依")]
+    # An empty character must fail closed instead of wiping every character.
+    assert asyncio.run(plugin.remove_all_images("")) == {"success": False, "error": "缺少角色名"}
+    assert len(calls) == 1
+
+
+def test_report_metrics_expose_numeric_values():
+    plugin = module.create_plugin()
+    metrics = {
+        "precision_numerator": 12,
+        "precision_denominator": 15,
+        "precision": 0.8,
+        "recall": 0.75,
+        "f1": 0.774,
+        "accuracy": 0.9,
+        "count": 20,
+        "balanced_accuracy": 0.88,
+        "other_recall": 0.95,
+        "confusion_matrix": [[9, 1], [2, 8]],
+    }
+    report = {
+        "selection": {"epoch": 3, "validation": metrics},
+        "test": metrics,
+        "historical_test": False,
+        "comparable_to_previous": True,
+        "total_seconds": 12.5,
+        "training_seconds_including_validation": 10.0,
+        "audit": {"passed": True},
+        "character": "洛天依",
+        "history": [],
+        "test_predictions": [],
+        "validation_predictions": [],
+    }
+    plugin.service = SimpleNamespace(
+        store=SimpleNamespace(
+            job=lambda job_id: {"character": "洛天依"},
+            report=lambda job_id: report,
+            threshold=lambda character: 0.6,
+        )
+    )
+    result = asyncio.run(plugin.report("job"))
+    test_row = next(row for row in result["metrics"] if row["split"] == "测试")
+    assert test_row["precision"] == "12/15 = 80.0%"
+    assert test_row["precision_value"] == 0.8
+    assert test_row["recall_value"] == 0.75
+    assert test_row["f1_value"] == 0.774
+    assert test_row["recall"] == "75.0%", "展示字段仍是百分比字符串"

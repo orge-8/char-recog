@@ -7,8 +7,9 @@ pytest.importorskip("torch", reason="输入尺寸用例需要 PyTorch")
 pytest.importorskip("torchvision", reason="输入尺寸用例需要 torchvision")
 
 from PIL import Image  # noqa: E402
+import torch  # noqa: E402
 from recog.model import Dataset, fresh_model, infer, loaded_model, train  # noqa: E402
-from test_catalog import corpus  # noqa: E402
+from test_catalog import CHAR, corpus  # noqa: E402
 
 
 def test_resize_precedes_augmentation(tmp_path):
@@ -32,7 +33,7 @@ def test_resize_precedes_augmentation(tmp_path):
 def test_size_survives_training_reload_and_inference(tmp_path, size):
     store = corpus(tmp_path)
     with store.db() as db:
-        snapshot = store.freeze(db, "size", "fresh", "cpu", size)
+        snapshot = store.freeze(db, "size", "fresh", "cpu", CHAR, size)
     assert snapshot["input_size"] == size
     assert snapshot["preprocessing"] == "resize_before_augment"
     directory = tmp_path / "jobs" / "size"
@@ -58,13 +59,13 @@ def test_legacy_weights_use_320(tmp_path):
 def test_invalid_size_rejected(tmp_path):
     store = corpus(tmp_path)
     with store.db() as db, pytest.raises(ValueError, match="224"):
-        store.freeze(db, "invalid", "fresh", "cpu", 999)
+        store.freeze(db, "invalid", "fresh", "cpu", CHAR, 999)
 
 
 def test_training_batch_may_contain_only_one_class(tmp_path):
     store = corpus(tmp_path)
     with store.db() as db:
-        snapshot = store.freeze(db, "oneclass", "fresh", "cpu", 224)
+        snapshot = store.freeze(db, "oneclass", "fresh", "cpu", CHAR, 224)
     snapshot["images"] = [r for r in snapshot["images"] if r["split"] != "train" or r["label"] == "self"]
     (tmp_path / "jobs" / "oneclass").mkdir()
     report = train(tmp_path, snapshot, lambda p: None, lambda: False, max_epochs=1)

@@ -6,14 +6,14 @@ torch = pytest.importorskip("torch", reason="断点恢复用例需要 PyTorch")
 pytest.importorskip("torchvision", reason="断点恢复用例需要 torchvision")
 
 from recog.model import TrainingPaused, train  # noqa: E402
-from test_catalog import corpus  # noqa: E402
+from test_catalog import CHAR, corpus  # noqa: E402
 
 
 @pytest.mark.parametrize("boundary", ["training", "validation"])
 def test_resume_matches_uninterrupted_weights(tmp_path, boundary):
     store = corpus(tmp_path)
     with store.db() as db:
-        snapshot = store.freeze(db, "exact", "fresh", "cpu")
+        snapshot = store.freeze(db, "exact", "fresh", "cpu", CHAR)
     directory = tmp_path / "jobs" / "exact"
     directory.mkdir()
     full = train(tmp_path, snapshot, lambda p: None, lambda: False, max_epochs=2)

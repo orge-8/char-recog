@@ -152,8 +152,14 @@
         },
         "remove_all": {
           "api": "self_images_remove_all",
-          "parameters": {},
-          "confirmation": "确认删除图片库中全部未删除图片？包括其他页和当前筛选之外的图片；已训练模型保留，图片可在已删除列表恢复。"
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "确认删除当前角色图片库中全部未删除图片？仅当前角色受影响，其他角色与已训练模型保留；图片可在已删除列表恢复。"
         },
         "label": {
           "api": "self_label",
@@ -336,6 +342,33 @@
             }
           },
           "confirmation": "确认卸载插件依赖？"
+        },
+        "apply_threshold": {
+          "api": "self_threshold_apply",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "value": {
+              "type": "string",
+              "required": true,
+              "max_length": 8
+            }
+          },
+          "confirmation": "确认修改该角色的判定阈值？模型权重不变，只影响之后的自动提示、工具判定与错判列表。"
+        },
+        "reset_threshold": {
+          "api": "self_threshold_reset",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "恢复该角色的默认判定阈值（0.60）？"
         }
       },
       "uploads": {
@@ -495,8 +528,14 @@
         },
         "remove_all": {
           "api": "self_images_remove_all",
-          "parameters": {},
-          "confirmation": "确认删除图片库中全部未删除图片？包括其他页和当前筛选之外的图片；已训练模型保留，图片可在已删除列表恢复。"
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "确认删除当前角色图片库中全部未删除图片？仅当前角色受影响，其他角色与已训练模型保留；图片可在已删除列表恢复。"
         },
         "label": {
           "api": "self_label",
@@ -679,6 +718,33 @@
             }
           },
           "confirmation": "确认卸载插件依赖？"
+        },
+        "apply_threshold": {
+          "api": "self_threshold_apply",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "value": {
+              "type": "string",
+              "required": true,
+              "max_length": 8
+            }
+          },
+          "confirmation": "确认修改该角色的判定阈值？模型权重不变，只影响之后的自动提示、工具判定与错判列表。"
+        },
+        "reset_threshold": {
+          "api": "self_threshold_reset",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "恢复该角色的默认判定阈值（0.60）？"
         }
       },
       "uploads": {
@@ -838,8 +904,14 @@
         },
         "remove_all": {
           "api": "self_images_remove_all",
-          "parameters": {},
-          "confirmation": "确认删除图片库中全部未删除图片？包括其他页和当前筛选之外的图片；已训练模型保留，图片可在已删除列表恢复。"
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "确认删除当前角色图片库中全部未删除图片？仅当前角色受影响，其他角色与已训练模型保留；图片可在已删除列表恢复。"
         },
         "label": {
           "api": "self_label",
@@ -1022,6 +1094,33 @@
             }
           },
           "confirmation": "确认卸载插件依赖？"
+        },
+        "apply_threshold": {
+          "api": "self_threshold_apply",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "value": {
+              "type": "string",
+              "required": true,
+              "max_length": 8
+            }
+          },
+          "confirmation": "确认修改该角色的判定阈值？模型权重不变，只影响之后的自动提示、工具判定与错判列表。"
+        },
+        "reset_threshold": {
+          "api": "self_threshold_reset",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "恢复该角色的默认判定阈值（0.60）？"
         }
       },
       "uploads": {
@@ -1181,8 +1280,14 @@
         },
         "remove_all": {
           "api": "self_images_remove_all",
-          "parameters": {},
-          "confirmation": "确认删除图片库中全部未删除图片？包括其他页和当前筛选之外的图片；已训练模型保留，图片可在已删除列表恢复。"
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "确认删除当前角色图片库中全部未删除图片？仅当前角色受影响，其他角色与已训练模型保留；图片可在已删除列表恢复。"
         },
         "label": {
           "api": "self_label",
@@ -1365,6 +1470,33 @@
             }
           },
           "confirmation": "确认卸载插件依赖？"
+        },
+        "apply_threshold": {
+          "api": "self_threshold_apply",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "value": {
+              "type": "string",
+              "required": true,
+              "max_length": 8
+            }
+          },
+          "confirmation": "确认修改该角色的判定阈值？模型权重不变，只影响之后的自动提示、工具判定与错判列表。"
+        },
+        "reset_threshold": {
+          "api": "self_threshold_reset",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "恢复该角色的默认判定阈值（0.60）？"
         }
       },
       "uploads": {
@@ -1524,8 +1656,14 @@
         },
         "remove_all": {
           "api": "self_images_remove_all",
-          "parameters": {},
-          "confirmation": "确认删除图片库中全部未删除图片？包括其他页和当前筛选之外的图片；已训练模型保留，图片可在已删除列表恢复。"
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "确认删除当前角色图片库中全部未删除图片？仅当前角色受影响，其他角色与已训练模型保留；图片可在已删除列表恢复。"
         },
         "label": {
           "api": "self_label",
@@ -1708,6 +1846,33 @@
             }
           },
           "confirmation": "确认卸载插件依赖？"
+        },
+        "apply_threshold": {
+          "api": "self_threshold_apply",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "value": {
+              "type": "string",
+              "required": true,
+              "max_length": 8
+            }
+          },
+          "confirmation": "确认修改该角色的判定阈值？模型权重不变，只影响之后的自动提示、工具判定与错判列表。"
+        },
+        "reset_threshold": {
+          "api": "self_threshold_reset",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "恢复该角色的默认判定阈值（0.60）？"
         }
       },
       "uploads": {

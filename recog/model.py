@@ -12,6 +12,7 @@ from torch import nn
 from torchvision import models, transforms
 
 from .images import decode, whole_image
+from .scores import EVALUATION_THRESHOLD, metrics
 
 
 class TrainingPaused(Exception):
@@ -21,28 +22,6 @@ class TrainingPaused(Exception):
 BASE_SHA = "047dcff4addef86ea5bc2eff13c9614dc11f47ab1160d0a71a25e7db994f4e1f"
 BASE_FILE = Path(__file__).resolve().parents[1] / "assets" / "mobilenet_v3_small-047dcff4.pth"
 NORMALIZE = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-
-
-def metrics(labels: list, scores: list) -> dict:
-    predicted = [int(s >= 0.5) for s in scores]
-    tp = sum(y == 1 and p == 1 for y, p in zip(labels, predicted))
-    fp = sum(y == 0 and p == 1 for y, p in zip(labels, predicted))
-    fn = sum(y == 1 and p == 0 for y, p in zip(labels, predicted))
-    tn = sum(y == 0 and p == 0 for y, p in zip(labels, predicted))
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
-    return {
-        "precision": precision,
-        "precision_numerator": tp,
-        "precision_denominator": tp + fp,
-        "recall": recall,
-        "other_recall": tn / (tn + fp) if tn + fp else 0.0,
-        "f1": 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else 0.0,
-        "accuracy": (tp + tn) / len(labels) if labels else 0.0,
-        "balanced_accuracy": (recall + (tn / (tn + fp) if tn + fp else 0.0)) / 2,
-        "confusion_matrix": [[tn, fp], [fn, tp]],
-        "count": len(labels),
-    }
 
 
 def seed_all() -> None:
@@ -97,7 +76,9 @@ class Dataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         row = self.rows[index]
-        image = decode((self.root / row["path"]).read_bytes())
+        # Legacy paused tasks keep their original augmentation order, where the
+        # jitter must see the untransformed image; only the current path drafts.
+        image = decode((self.root / row["path"]).read_bytes(), self.input_size if self.resize_first else None)
         # Legacy paused tasks retain their original augmentation order.
         if self.resize_first:
             image = whole_image(image, self.input_size)
@@ -108,7 +89,7 @@ class Dataset(torch.utils.data.Dataset):
         return NORMALIZE(transforms.ToTensor()(image)), int(row["label"] == "self")
 
 
-def evaluate(model: nn.Module, root: Path, rows: list, device: str, batch: int) -> tuple:
+def evaluate(model: nn.Module, root: Path, rows: list, device: str, batch: int, threshold: float = EVALUATION_THRESHOLD) -> tuple:
     model.eval()
     labels = []
     scores = []
@@ -120,8 +101,8 @@ def evaluate(model: nn.Module, root: Path, rows: list, device: str, batch: int) 
                 raise ValueError("推理输出非有限")
             scores.extend(out.softmax(-1)[:, 1].cpu().tolist())
             labels.extend(truth.tolist())
-    return metrics(labels, scores), [
-        {"id": r["id"], "label": r["label"], "score": s, "predicted": "self" if s >= 0.5 else "other"}
+    return metrics(labels, scores, threshold), [
+        {"id": r["id"], "label": r["label"], "score": s, "predicted": "self" if s >= threshold else "other"}
         for r, s in zip(rows, scores)
     ]
 
@@ -315,7 +296,9 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
         "epoch": best[1]["epoch"],
         "validation": best[1]["validation"],
         "rule": "F1,balanced_accuracy,precision,earlier_epoch",
-        "threshold": 0.5,
+        # Evaluation gate used for epoch selection and the audit below. It is
+        # NOT the online prompt gate; that one is per character (scores.py).
+        "threshold": EVALUATION_THRESHOLD,
     }
     atomic_json(job_dir / "selection.json", selection)
     selection_sha = hashlib.sha256((job_dir / "selection.json").read_bytes()).hexdigest()
@@ -348,12 +331,13 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
         sets = [{r[key] for r in partitions[s]} for s in partitions]
         isolation = isolation and all(not sets[i] & sets[j] for i in range(3) for j in range(i))
     hashes = all(hashlib.sha256((root / r["path"]).read_bytes()).hexdigest() == r["sha"] for r in rows)
+    selection_threshold = selection["threshold"]
     recomputed = (
-        metrics([int(r["label"] == "self") for r in test_predictions], [r["score"] for r in test_predictions]) == test
+        metrics([int(r["label"] == "self") for r in test_predictions], [r["score"] for r in test_predictions], selection_threshold) == test
     )
     recomputed = (
         recomputed
-        and metrics([int(r["label"] == "self") for r in best[2]], [r["score"] for r in best[2]])
+        and metrics([int(r["label"] == "self") for r in best[2]], [r["score"] for r in best[2]], selection_threshold)
         == best[1]["validation"]
     )
     # Independently reload the saved artifact on CPU and compare probabilities.
@@ -397,11 +381,22 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     }
 
 
-def infer(model: nn.Module, raw: bytes) -> float:
-    image = decode(raw)
-    tensor = NORMALIZE(transforms.ToTensor()(whole_image(image, model.input_size))).unsqueeze(0)
+def tensor_for_image(image, input_size: int):
+    """Letterbox + normalize once; the same tensor serves every model of that size."""
+    return NORMALIZE(transforms.ToTensor()(whole_image(image, input_size))).unsqueeze(0)
+
+
+def tensor_for(raw: bytes, input_size: int):
+    return tensor_for_image(decode(raw, input_size), input_size)
+
+
+def score_tensor(model: nn.Module, tensor) -> float:
     with torch.inference_mode():
         score = model(tensor).float().softmax(-1)[0, 1].item()
     if not np.isfinite(score):
         raise ValueError("非有限模型得分")
     return score
+
+
+def infer(model: nn.Module, raw: bytes) -> float:
+    return score_tensor(model, tensor_for(raw, model.input_size))
