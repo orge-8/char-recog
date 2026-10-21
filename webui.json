@@ -114,6 +114,34 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "upload_style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo",
+                ""
+              ]
+            },
+            "upload_neg_type": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "other_character",
+                "non_character",
+                ""
+              ]
+            },
+            "upload_has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no",
+                ""
+              ]
             }
           }
         },
@@ -154,7 +182,6 @@
                 "flat",
                 "paint",
                 "photo",
-                "composite",
                 ""
               ]
             },
@@ -164,7 +191,15 @@
               "choices": [
                 "other_character",
                 "non_character",
-                "sticker",
+                ""
+              ]
+            },
+            "has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no",
                 ""
               ]
             }
@@ -477,6 +512,34 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "upload_style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo",
+                ""
+              ]
+            },
+            "upload_neg_type": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "other_character",
+                "non_character",
+                ""
+              ]
+            },
+            "upload_has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no",
+                ""
+              ]
             }
           }
         }
@@ -663,6 +726,34 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "upload_style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo",
+                ""
+              ]
+            },
+            "upload_neg_type": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "other_character",
+                "non_character",
+                ""
+              ]
+            },
+            "upload_has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no",
+                ""
+              ]
             }
           }
         }
@@ -801,6 +892,34 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "upload_style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo",
+                ""
+              ]
+            },
+            "upload_neg_type": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "other_character",
+                "non_character",
+                ""
+              ]
+            },
+            "upload_has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no",
+                ""
+              ]
             }
           }
         }
@@ -989,6 +1108,34 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "upload_style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo",
+                ""
+              ]
+            },
+            "upload_neg_type": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "other_character",
+                "non_character",
+                ""
+              ]
+            },
+            "upload_has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no",
+                ""
+              ]
             }
           }
         }

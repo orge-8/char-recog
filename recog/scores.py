@@ -20,8 +20,17 @@ JUDGMENT_BAND = 0.2
 # Content type (medium) is a single axis on purpose: only this axis has a measured
 # effect on recall (thick-paint fan art 2% vs flat chibi sticker 91%). The names are
 # subject-agnostic so the same four buckets work for game characters, idols or pets.
-STYLE_LABELS = {"flat": "平涂/Q版", "paint": "厚涂插画", "photo": "实拍", "composite": "图文/梗图"}
-NEG_LABELS = {"other_character": "其他角色", "non_character": "非角色内容", "sticker": "表情包"}
+STYLE_LABELS = {"flat": "平涂/Q版", "paint": "厚涂插画", "photo": "实拍"}
+# Text overlay is not a way of painting, it is a property that crosses all three
+# mediums: a sticker, a fan art and a doll photo can all carry text. It used to be
+# a fourth medium ("图文/梗图"), which forced one field to answer two questions.
+TEXT_LABELS = {"yes": "有文字叠加", "no": "无文字叠加"}
+# The negative bucket is the *identity* axis only: "was the thing mistaken for the
+# character actually another character, or something that is not a character at
+# all". 「表情包」used to live here and had to go: it is a medium, not an identity,
+# so it overlapped both values above and is already carried by style=composite
+# (图文/梗图). One field, one axis.
+NEG_LABELS = {"other_character": "其他角色", "non_character": "非角色内容"}
 # Below this many eval images a bucket gets no percentage: a 3-image "0%" is noise.
 STYLE_MIN_COUNT = 5
 # Raw scores from different per-character models are not calibrated against each
@@ -94,6 +103,70 @@ def by_style(predictions: list, threshold: float = EVALUATION_THRESHOLD, min_cou
                     or (positives and positives < min_count)
                     or (negatives and negatives < min_count)
                 ),
+            }
+        )
+    return rows
+
+
+def by_text(predictions: list, threshold: float = EVALUATION_THRESHOLD, min_count: int = STYLE_MIN_COUNT) -> list:
+    """Recall with and without a text overlay, on the fixed evaluation set.
+
+    Reported next to the medium table rather than as a row inside it: it is a
+    marker, so a "有文字" row would double-count the same images.
+    """
+    buckets: dict = {}
+    for row in predictions:
+        buckets.setdefault(row.get("has_text") or "", []).append(row)
+    rows = []
+    for key, items in sorted(buckets.items(), key=lambda kv: (kv[0] == "", kv[0])):
+        labels = [int(row["label"] == "self") for row in items]
+        scores = [row["score"] for row in items]
+        summary = metrics(labels, scores, threshold)
+        positives = sum(labels)
+        negatives = len(labels) - positives
+        rows.append(
+            {
+                "has_text": key,
+                "label": TEXT_LABELS.get(key, "未标注"),
+                "n": len(items),
+                "positives": positives,
+                "negatives": negatives,
+                "recall": summary["recall"],
+                "fpr": 1 - summary["other_recall"] if negatives else 0.0,
+                "unreliable": bool(
+                    len(items) < min_count
+                    or (positives and positives < min_count)
+                    or (negatives and negatives < min_count)
+                ),
+            }
+        )
+    return rows
+
+
+def by_neg(predictions: list, threshold: float = EVALUATION_THRESHOLD, min_count: int = STYLE_MIN_COUNT) -> list:
+    """Per-negative-bucket false-positive rate on the fixed evaluation set.
+
+    Answers the question the medium axis cannot: ``误报的是不是别的角色``. A row with
+    ``neg_type == ""`` is a negative that was never bucketed — it is shown as
+    未标注 rather than dropped, because silently losing it is how the FPR column
+    ends up empty while the page looks fine.
+    """
+    buckets: dict = {}
+    for row in predictions:
+        if row.get("label") != "other":
+            continue
+        buckets.setdefault(row.get("neg_type") or "", []).append(row)
+    rows = []
+    for neg_type, items in sorted(buckets.items(), key=lambda kv: (kv[0] == "", kv[0])):
+        flagged = sum(1 for row in items if row["score"] >= threshold)
+        rows.append(
+            {
+                "neg_type": neg_type,
+                "label": NEG_LABELS.get(neg_type, "未标注"),
+                "n": len(items),
+                "flagged": flagged,
+                "fpr": flagged / len(items),
+                "unreliable": len(items) < min_count,
             }
         )
     return rows

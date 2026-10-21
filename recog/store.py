@@ -21,12 +21,15 @@ from .scores import (
     NEG_LABELS,
     STYLE_LABELS,
     STYLE_MIN_COUNT,
+    TEXT_LABELS,
 )
 
 # 内容类型（媒材）单轴。只有这一轴有实测效应：同人厚涂插画召回 2%，平涂 Q 版贴纸 91%。
 # 名称刻意与「官方/二创」无关 —— 那对差别不是召回差异的来源（docs/p0-change-list.md）。
 STYLES = STYLE_LABELS
 NEG_TYPES = NEG_LABELS
+# 文字叠加：与三档正交的标记，不是第四种画法。
+TEXT_MARKS = TEXT_LABELS
 # 固定评估集：每档默认 25 张。低于 5 张不给百分比（小样本不给点估计）。
 EVAL_PER_STYLE = 25
 EVAL_PER_NEG_KIND = 15
@@ -97,7 +100,7 @@ class Store:
         with self.db() as db:
             db.executescript("""
               PRAGMA journal_mode=WAL;
-              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', style TEXT NOT NULL DEFAULT '', neg_type TEXT NOT NULL DEFAULT '');
+              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', style TEXT NOT NULL DEFAULT '', neg_type TEXT NOT NULL DEFAULT '', has_text TEXT NOT NULL DEFAULT '');
               CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, split TEXT);
               CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request_key TEXT UNIQUE, state TEXT, pid INTEGER, error TEXT, created REAL, snapshot_sha TEXT, character TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '', input_size INTEGER);
               CREATE UNIQUE INDEX IF NOT EXISTS one_training ON jobs((1)) WHERE state IN ('queued','running','cancelling');
@@ -127,6 +130,36 @@ class Store:
                 db.execute("ALTER TABLE images ADD COLUMN style TEXT NOT NULL DEFAULT ''")
             if "neg_type" not in columns:
                 db.execute("ALTER TABLE images ADD COLUMN neg_type TEXT NOT NULL DEFAULT ''")
+            if "has_text" not in columns:
+                db.execute("ALTER TABLE images ADD COLUMN has_text TEXT NOT NULL DEFAULT ''")
+            # 0.5.18: 「图文/梗图」was a fourth medium that mixed画法 with叠加层. The
+            # information it carried (text on the image) moves to has_text; the
+            # medium stays empty because a meme is usually平涂 but we cannot tell.
+            moved = db.execute("SELECT COUNT(*) FROM images WHERE style='composite'").fetchone()[0]
+            if moved:
+                db.execute(
+                    "UPDATE images SET has_text=CASE WHEN has_text='' THEN 'yes' ELSE has_text END, "
+                    "style='' WHERE style='composite'"
+                )
+                db.execute(
+                    "INSERT OR REPLACE INTO settings VALUES (?,?)",
+                    ("composite_migrated", dump({"moved": moved, "at": time.time()})),
+                )
+            # 0.5.17: 「表情包」left the negative bucket because it is a medium, not an
+            # identity. Leaving the old values in place would make them invisible
+            # everywhere (no label, excluded from eval sampling) instead of merely
+            # wrong, so they are cleared once and the count is kept for diagnosis.
+            stale = db.execute(
+                "SELECT COUNT(*) FROM images WHERE neg_type NOT IN ('', 'other_character', 'non_character')"
+            ).fetchone()[0]
+            if stale:
+                db.execute(
+                    "UPDATE images SET neg_type='' WHERE neg_type NOT IN ('', 'other_character', 'non_character')"
+                )
+                db.execute(
+                    "INSERT OR REPLACE INTO settings VALUES (?,?)",
+                    ("neg_type_reset", dump({"cleared": stale, "at": time.time()})),
+                )
 
     @contextmanager
     def db(self) -> Iterator[sqlite3.Connection]:
@@ -235,15 +268,26 @@ class Store:
             reason = "label_conflict" if len(labels) > 1 else ("duplicate" if index else "")
             db.execute("UPDATE images SET reason=? WHERE id=?", (reason, row["id"]))
 
-    def ingest(self, path: Path, label: str | None = None, character: str = "", style: str = "", neg_type: str = "") -> dict:
+    def ingest(
+        self,
+        path: Path,
+        label: str | None = None,
+        character: str = "",
+        style: str = "",
+        neg_type: str = "",
+        has_text: str = "",
+    ) -> dict:
         if label not in {None, "self", "other"}:
             raise ValueError("上传身份必须为是Bot或不是Bot")
         style = (style or "").strip()
         neg_type = (neg_type or "").strip()
+        has_text = (has_text or "").strip()
         if style and style not in STYLES:
-            raise ValueError("内容类型必须为平涂/Q版、厚涂插画、实拍或图文/梗图")
+            raise ValueError("内容类型必须为平涂/Q版、厚涂插画或实拍")
+        if has_text and has_text not in TEXT_MARKS:
+            raise ValueError("文字叠加必须为有文字或无文字")
         if neg_type and neg_type not in NEG_TYPES:
-            raise ValueError("负例类型必须为其他角色、非角色内容或表情包")
+            raise ValueError("负例类型必须为其他角色或非角色内容")
         if neg_type and label != "other":
             raise ValueError("只有「不是该角色」的图片才能选负例类型")
         character = self.validate_character(character)
@@ -289,7 +333,7 @@ class Store:
                     db.execute("UPDATE groups SET split=? WHERE id=?", (next(iter(splits)), group))
             shutil.move(path, destination)
             db.execute(
-                "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,style,neg_type) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
+                "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,style,neg_type,has_text) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
                 (
                     ident,
                     str(destination.relative_to(self.root)),
@@ -306,6 +350,7 @@ class Store:
                     character,
                     style,
                     neg_type,
+                    has_text,
                 ),
             )
             self._reconcile(db, group)
@@ -344,41 +389,60 @@ class Store:
         return style
 
     @staticmethod
+    def validate_has_text(has_text: str) -> str:
+        has_text = (has_text or "").strip()
+        if has_text and has_text not in TEXT_MARKS:
+            raise ValueError("文字叠加必须为有文字或无文字")
+        return has_text
+
+    @staticmethod
     def validate_neg_type(neg_type: str) -> str:
         neg_type = (neg_type or "").strip()
         if neg_type and neg_type not in NEG_TYPES:
             raise ValueError("负例类型必须为其他角色、非角色内容或表情包")
         return neg_type
 
-    def set_style(self, image_id: str, style: str = "", neg_type: str | None = None) -> dict:
-        """Tag one image. `neg_type=None` leaves the negative bucket untouched."""
+    def set_style(
+        self, image_id: str, style: str = "", neg_type: str | None = None, has_text: str | None = None
+    ) -> dict:
+        """Tag one image. `None` leaves that field untouched, "" clears it."""
         style = self.validate_style(style)
         if neg_type is not None:
             neg_type = self.validate_neg_type(neg_type)
+        if has_text is not None:
+            has_text = self.validate_has_text(has_text)
         with self.db() as db:
             row = db.execute("SELECT label FROM images WHERE id=?", (image_id,)).fetchone()
             if row is None:
                 raise ValueError("图片不存在")
             if neg_type and row["label"] != "other":
                 raise ValueError("只有「不是该角色」的图片才能选负例类型")
-            if neg_type is None:
-                db.execute("UPDATE images SET style=? WHERE id=?", (style, image_id))
-            else:
-                db.execute("UPDATE images SET style=?,neg_type=? WHERE id=?", (style, neg_type, image_id))
-        return {"id": image_id, "style": style, "neg_type": neg_type}
+            fields, values = ["style=?"], [style]
+            if neg_type is not None:
+                fields.append("neg_type=?")
+                values.append(neg_type)
+            if has_text is not None:
+                fields.append("has_text=?")
+                values.append(has_text)
+            db.execute(f"UPDATE images SET {', '.join(fields)} WHERE id=?", (*values, image_id))
+        return {"id": image_id, "style": style, "neg_type": neg_type, "has_text": has_text}
 
-    def batch_style(self, image_ids, style: str | None = None, neg_type: str | None = None) -> dict:
+    def batch_style(
+        self, image_ids, style: str | None = None, neg_type: str | None = None, has_text: str | None = None
+    ) -> dict:
         """Tag a whole selection in one transaction.
 
         ``None`` means "leave unchanged" and ``""`` means "clear", so the page can
         set a medium without silently wiping the negative bucket and vice versa.
         """
-        if style is None and neg_type is None:
-            raise ValueError("请选择要设置的内容类型或负例类型")
+        if style is None and neg_type is None and has_text is None:
+            raise ValueError("请选择要设置的内容类型、负例类型或文字叠加")
         if style is not None:
             style = self.validate_style(style)
         if neg_type is not None:
             neg_type = self.validate_neg_type(neg_type)
+        if has_text is not None:
+            has_text = self.validate_has_text(has_text)
         ids = self.split_ids(image_ids)
         if not ids or len(ids) > 1000:
             raise ValueError("请先选择图片，每批最多1000张")
@@ -399,8 +463,11 @@ class Store:
             if neg_type is not None:
                 fields.append("neg_type=?")
                 values.append(neg_type)
+            if has_text is not None:
+                fields.append("has_text=?")
+                values.append(has_text)
             db.execute(f"UPDATE images SET {', '.join(fields)} WHERE id IN ({placeholders})", [*values, *ids])
-        return {"updated": len(ids), "style": style, "neg_type": neg_type}
+        return {"updated": len(ids), "style": style, "neg_type": neg_type, "has_text": has_text}
 
     @staticmethod
     def split_ids(image_ids) -> list:
@@ -538,6 +605,7 @@ class Store:
             r["label_text"] = {"self": f"是{character}", "other": f"不是{character}", "skip": "跳过"}.get(r["label"], "未标注")
             r["style_text"] = STYLES.get(r.get("style") or "", "未标注类型")
             r["neg_type_text"] = NEG_TYPES.get(r.get("neg_type") or "", "")
+            r["has_text_text"] = TEXT_MARKS.get(r.get("has_text") or "", "")
             r["trained"] = index.seen(r)
             r["training_text"] = "当前模型已训练" if r["trained"] else "评估集" if r["split"] == "eval" else "验证集" if r["split"] == "val" else "测试集" if r["split"] == "test" else "待训练"
             prediction = predictions.get(r["id"])
@@ -772,11 +840,18 @@ class Store:
             representatives.setdefault(row["group_id"], row)
         picked: list = []
         unisolated: list = []
-        for label, field, wanted, values in (
-            ("self", "style", per_style, tuple(STYLES)),
-            ("other", "neg_type", neg_per_kind, tuple(NEG_TYPES)),
+        for label, field, wanted, values, allow_blank in (
+            ("self", "style", per_style, tuple(STYLES), False),
+            # "" is a real bucket for negatives: a negative whose identity was never
+            # bucketed still has to be evaluated, otherwise the FPR column is empty
+            # for every user who only tagged the medium.
+            ("other", "neg_type", neg_per_kind, (*NEG_TYPES, ""), True),
         ):
-            cohort = [r for r in representatives.values() if r["label"] == label and r[field]]
+            cohort = [
+                r
+                for r in representatives.values()
+                if r["label"] == label and (allow_blank or r[field])
+            ]
             budget = max(0, len(cohort) - EVAL_MIN_TRAIN)
             taken = 0
             # Rarest medium first: a 3-image bucket must not be crowded out by the

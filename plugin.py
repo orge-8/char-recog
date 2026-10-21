@@ -23,7 +23,10 @@ from .recog.scores import (
     JUDGMENT_BAND,
     STYLE_LABELS,
     NEG_LABELS,
+    TEXT_LABELS,
+    by_neg,
     by_style,
+    by_text,
     metrics,
     select_top,
     style_advice,
@@ -169,7 +172,13 @@ class CharacterRecognition(MaiBotPlugin):
 
     @API("self_upload", version="1")
     async def upload(
-        self, upload_id: str, character: str, upload_label: str = "self", upload_style: str = "", upload_neg_type: str = ""
+        self,
+        upload_id: str,
+        character: str,
+        upload_label: str = "self",
+        upload_style: str = "",
+        upload_neg_type: str = "",
+        upload_has_text: str = "",
     ) -> dict:
         if upload_label not in {"self", "other"}:
             return {"success": False, "error": "上传身份必须为是角色或不是角色"}
@@ -179,7 +188,13 @@ class CharacterRecognition(MaiBotPlugin):
             return {"success": False, "error": str(exc)}
         claimed = await self.ctx.webui.claim_upload(upload_id)
         result = await self._action(
-            self.service.store.ingest, Path(claimed["path"]), upload_label, character, upload_style, upload_neg_type
+            self.service.store.ingest,
+            Path(claimed["path"]),
+            upload_label,
+            character,
+            upload_style,
+            upload_neg_type,
+            upload_has_text,
         )
         if result.get("already_exists"):
             result["message"] = "图片已存在，复用原标注"
@@ -261,9 +276,15 @@ class CharacterRecognition(MaiBotPlugin):
         return await self._action(self.service.store.set_style, image_id, style, neg_type or None)
 
     @API("self_images_batch_style", version="1")
-    async def batch_style(self, image_ids: str, style: str | None = None, neg_type: str | None = None) -> dict:
+    async def batch_style(
+        self,
+        image_ids: str,
+        style: str | None = None,
+        neg_type: str | None = None,
+        has_text: str | None = None,
+    ) -> dict:
         # Omitted parameter = leave the field alone; "" = clear it.
-        return await self._action(self.service.store.batch_style, image_ids, style, neg_type)
+        return await self._action(self.service.store.batch_style, image_ids, style, neg_type, has_text)
 
     @API("self_eval_rebuild", version="1")
     async def eval_rebuild(self, character: str = "") -> dict:
@@ -496,6 +517,12 @@ class CharacterRecognition(MaiBotPlugin):
                 plan = None
         styles = {
             "rows": style_rows,
+            # The identity axis, reported separately from the medium axis: "误报的
+            # 是不是别的角色" is not the same question as "哪类图容易误报".
+            "neg_rows": by_neg(eval_predictions, current) if eval_predictions else [],
+            # A marker, not a fourth medium: reported beside the medium table.
+            "text_rows": by_text(eval_predictions, current) if eval_predictions else [],
+            "text_labels": TEXT_LABELS,
             "coverage": coverage,
             "advice": style_advice(
                 coverage,

@@ -136,6 +136,7 @@ def evaluate(model: nn.Module, root: Path, rows: list, device: str, batch: int, 
             "predicted": "self" if s >= threshold else "other",
             "style": r.get("style") or "",
             "neg_type": r.get("neg_type") or "",
+            "has_text": r.get("has_text") or "",
         }
         for r, s in zip(rows, scores)
     ]

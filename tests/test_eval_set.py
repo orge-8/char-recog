@@ -156,9 +156,9 @@ def test_style_and_neg_type_validation(tmp_path):
     with pytest.raises(ValueError):
         store.set_style(result["id"], "flat", "non_character")  # positives cannot carry a neg bucket
     negative = add(store, 2, "other", "photo", neg_type="non_character")
-    store.set_style(negative["id"], "photo", "sticker")
+    store.set_style(negative["id"], "photo", "other_character")
     listed = {row["id"]: row for row in store.images(character=CHAR)["rows"]}
-    assert listed[negative["id"]]["neg_type"] == "sticker"
+    assert listed[negative["id"]]["neg_type"] == "other_character"
 
 
 def test_batch_style_rejects_mixed_labels_for_negative_bucket(tmp_path):
@@ -166,7 +166,7 @@ def test_batch_style_rejects_mixed_labels_for_negative_bucket(tmp_path):
     positive = add(store, 1, "self", "flat")
     negative = add(store, 2, "other", "photo", neg_type="non_character")
     with pytest.raises(ValueError):
-        store.batch_style(f"{positive['id']},{negative['id']}", "flat", "sticker")
+        store.batch_style(f"{positive['id']},{negative['id']}", "flat", "other_character")
     store.batch_style(f"{positive['id']},{negative['id']}", "paint")
     listed = {row["id"]: row for row in store.images(character=CHAR)["rows"]}
     assert listed[positive["id"]]["style"] == "paint"
@@ -225,7 +225,8 @@ def test_readiness_reports_coverage(tmp_path):
     store = Store(tmp_path)
     seed_corpus(store)
     readiness = store.training_readiness(CHAR)
-    assert {row["style"] for row in readiness["coverage"]} == {"flat", "paint", "photo", "composite", ""}
+    assert {row["style"] for row in readiness["coverage"]} == {"flat", "paint", "photo", ""}
     # 实拍 only exists as negatives here, so it is missing as a positive medium.
-    assert readiness["coverage_missing"] == ["实拍", "图文/梗图"]
+    # 图文/梗图 is no longer a medium (it became the has_text marker in 0.5.18).
+    assert readiness["coverage_missing"] == ["实拍"]
     assert "平涂/Q版" in readiness["coverage_text"]
