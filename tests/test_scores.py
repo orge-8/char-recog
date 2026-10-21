@@ -169,11 +169,23 @@ def test_select_top_keeps_only_the_best_accepted_character():
 def test_select_top_suppresses_a_close_call():
     results = [
         {"status": "ok", "character": "A", "score": 0.85},
+        {"status": "ok", "character": "B", "score": 0.84},
+    ]
+    policy = scores.select_top(results, {})
+    assert policy["margin"] == pytest.approx(0.01)
+    assert policy["ambiguous"] is True
+
+
+def test_select_top_keeps_a_five_point_lead():
+    """实测：0.05 的边际在真实模型上几乎总是「top1 正确、top2 是另一个角色的误报」。
+    0.08 曾把 4.6% 的正确命中（top1 ≥0.93）压成不提示，所以只留 0.02 抓真正的平手。"""
+    results = [
+        {"status": "ok", "character": "A", "score": 0.85},
         {"status": "ok", "character": "B", "score": 0.80},
     ]
     policy = scores.select_top(results, {})
-    assert policy["margin"] == pytest.approx(0.05)
-    assert policy["ambiguous"] is True
+    assert policy["top1"]["character"] == "A"
+    assert policy["ambiguous"] is False
 
 
 def test_select_top_suppresses_a_tie():

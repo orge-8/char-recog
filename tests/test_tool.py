@@ -43,6 +43,7 @@ def test_report_navigation_does_not_write_shared_settings():
     plugin = module.create_plugin()
     calls = []
     plugin.service = SimpleNamespace(store=SimpleNamespace(
+        style_coverage=lambda character: [],
         validate_character=Store.validate_character,
         job=lambda job_id: {"state": "complete", "character": "洛天依"},
         images=lambda page, view, job_id, character: calls.append((page, view, job_id, character)) or {},
@@ -172,6 +173,7 @@ def test_automatic_media_annotations_cache_and_model_switch():
 
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
+            style_coverage=lambda character: [],
             active_characters=lambda: ["洛天依"], active=lambda c: version[0], thresholds=lambda: {}
         ),
         infer=infer,
@@ -246,6 +248,7 @@ def test_remove_all_forwards_character():
     calls = []
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
+            style_coverage=lambda character: [],
             validate_character=Store.validate_character,
             batch_update=lambda ids, operation, character="": calls.append((ids, operation, character))
             or {"updated": 1},
@@ -287,6 +290,7 @@ def test_report_metrics_expose_numeric_values():
     }
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
+            style_coverage=lambda character: [],
             job=lambda job_id: {"character": "洛天依"},
             report=lambda job_id: report,
             threshold=lambda character: 0.6,

@@ -13,7 +13,26 @@ import time
 import uuid
 
 from .images import decode, fingerprint, similar, thumbnail
-from .scores import DEFAULT_THRESHOLD, EVALUATION_THRESHOLD, MAX_THRESHOLD, MIN_THRESHOLD
+from .scores import (
+    DEFAULT_THRESHOLD,
+    EVALUATION_THRESHOLD,
+    MAX_THRESHOLD,
+    MIN_THRESHOLD,
+    NEG_LABELS,
+    STYLE_LABELS,
+    STYLE_MIN_COUNT,
+)
+
+# 内容类型（媒材）单轴。只有这一轴有实测效应：同人厚涂插画召回 2%，平涂 Q 版贴纸 91%。
+# 名称刻意与「官方/二创」无关 —— 那对差别不是召回差异的来源（docs/p0-change-list.md）。
+STYLES = STYLE_LABELS
+NEG_TYPES = NEG_LABELS
+# 固定评估集：每档默认 25 张。低于 5 张不给百分比（小样本不给点估计）。
+EVAL_PER_STYLE = 25
+EVAL_PER_NEG_KIND = 15
+EVAL_MIN_COUNT = STYLE_MIN_COUNT
+# 每类留至少这么多组给训练：这是插件能训练的下限，评估集不能把它吃掉。
+EVAL_MIN_TRAIN = 20
 
 
 def dump(value: Any) -> str:
@@ -78,7 +97,7 @@ class Store:
         with self.db() as db:
             db.executescript("""
               PRAGMA journal_mode=WAL;
-              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '');
+              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', style TEXT NOT NULL DEFAULT '', neg_type TEXT NOT NULL DEFAULT '');
               CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, split TEXT);
               CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request_key TEXT UNIQUE, state TEXT, pid INTEGER, error TEXT, created REAL, snapshot_sha TEXT, character TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '', input_size INTEGER);
               CREATE UNIQUE INDEX IF NOT EXISTS one_training ON jobs((1)) WHERE state IN ('queued','running','cancelling');
@@ -100,6 +119,14 @@ class Store:
                 db.execute("ALTER TABLE jobs ADD COLUMN device TEXT NOT NULL DEFAULT ''")
             if "input_size" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN input_size INTEGER")
+            # 0.5.12: content type (medium) and negative bucket. Additive only —
+            # every existing row keeps style='' and neg_type='', which reproduces
+            # the 0.5.x behaviour exactly (one '' stratum, no eval set).
+            columns = {row[1] for row in db.execute("PRAGMA table_info(images)")}
+            if "style" not in columns:
+                db.execute("ALTER TABLE images ADD COLUMN style TEXT NOT NULL DEFAULT ''")
+            if "neg_type" not in columns:
+                db.execute("ALTER TABLE images ADD COLUMN neg_type TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def db(self) -> Iterator[sqlite3.Connection]:
@@ -208,9 +235,17 @@ class Store:
             reason = "label_conflict" if len(labels) > 1 else ("duplicate" if index else "")
             db.execute("UPDATE images SET reason=? WHERE id=?", (reason, row["id"]))
 
-    def ingest(self, path: Path, label: str | None = None, character: str = "") -> dict:
+    def ingest(self, path: Path, label: str | None = None, character: str = "", style: str = "", neg_type: str = "") -> dict:
         if label not in {None, "self", "other"}:
             raise ValueError("上传身份必须为是Bot或不是Bot")
+        style = (style or "").strip()
+        neg_type = (neg_type or "").strip()
+        if style and style not in STYLES:
+            raise ValueError("内容类型必须为平涂/Q版、厚涂插画、实拍或图文/梗图")
+        if neg_type and neg_type not in NEG_TYPES:
+            raise ValueError("负例类型必须为其他角色、非角色内容或表情包")
+        if neg_type and label != "other":
+            raise ValueError("只有「不是该角色」的图片才能选负例类型")
         character = self.validate_character(character)
         path = path.resolve()
         if not path.is_relative_to(self.root / "uploads") or path.is_symlink():
@@ -254,7 +289,7 @@ class Store:
                     db.execute("UPDATE groups SET split=? WHERE id=?", (next(iter(splits)), group))
             shutil.move(path, destination)
             db.execute(
-                "INSERT INTO images VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
+                "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,style,neg_type) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
                 (
                     ident,
                     str(destination.relative_to(self.root)),
@@ -269,6 +304,8 @@ class Store:
                     reason,
                     time.time(),
                     character,
+                    style,
+                    neg_type,
                 ),
             )
             self._reconcile(db, group)
@@ -298,6 +335,72 @@ class Store:
             db.execute("UPDATE images SET removed=? WHERE id=?", (int(removed), image_id))
             self._reconcile(db, row[0])
         return {"id": image_id, "removed": removed}
+
+    @staticmethod
+    def validate_style(style: str) -> str:
+        style = (style or "").strip()
+        if style and style not in STYLES:
+            raise ValueError("内容类型必须为平涂/Q版、厚涂插画、实拍或图文/梗图")
+        return style
+
+    @staticmethod
+    def validate_neg_type(neg_type: str) -> str:
+        neg_type = (neg_type or "").strip()
+        if neg_type and neg_type not in NEG_TYPES:
+            raise ValueError("负例类型必须为其他角色、非角色内容或表情包")
+        return neg_type
+
+    def set_style(self, image_id: str, style: str = "", neg_type: str | None = None) -> dict:
+        """Tag one image. `neg_type=None` leaves the negative bucket untouched."""
+        style = self.validate_style(style)
+        if neg_type is not None:
+            neg_type = self.validate_neg_type(neg_type)
+        with self.db() as db:
+            row = db.execute("SELECT label FROM images WHERE id=?", (image_id,)).fetchone()
+            if row is None:
+                raise ValueError("图片不存在")
+            if neg_type and row["label"] != "other":
+                raise ValueError("只有「不是该角色」的图片才能选负例类型")
+            if neg_type is None:
+                db.execute("UPDATE images SET style=? WHERE id=?", (style, image_id))
+            else:
+                db.execute("UPDATE images SET style=?,neg_type=? WHERE id=?", (style, neg_type, image_id))
+        return {"id": image_id, "style": style, "neg_type": neg_type}
+
+    def batch_style(self, image_ids, style: str | None = None, neg_type: str | None = None) -> dict:
+        """Tag a whole selection in one transaction.
+
+        ``None`` means "leave unchanged" and ``""`` means "clear", so the page can
+        set a medium without silently wiping the negative bucket and vice versa.
+        """
+        if style is None and neg_type is None:
+            raise ValueError("请选择要设置的内容类型或负例类型")
+        if style is not None:
+            style = self.validate_style(style)
+        if neg_type is not None:
+            neg_type = self.validate_neg_type(neg_type)
+        ids = self.split_ids(image_ids)
+        if not ids or len(ids) > 1000:
+            raise ValueError("请先选择图片，每批最多1000张")
+        if any(len(i) != 32 or any(c not in "0123456789abcdef" for c in i) for i in ids):
+            raise ValueError("无效图片ID")
+        placeholders = ",".join("?" for _ in ids)
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(f"SELECT id,label FROM images WHERE id IN ({placeholders})", ids).fetchall()
+            if len(rows) != len(ids):
+                raise ValueError("选择中有不存在的图片，请清空选择后重新选择")
+            if neg_type and any(row["label"] != "other" for row in rows):
+                raise ValueError("选择中包含「是该角色」的图片，不能设负例类型")
+            fields, values = [], []
+            if style is not None:
+                fields.append("style=?")
+                values.append(style)
+            if neg_type is not None:
+                fields.append("neg_type=?")
+                values.append(neg_type)
+            db.execute(f"UPDATE images SET {', '.join(fields)} WHERE id IN ({placeholders})", [*values, *ids])
+        return {"updated": len(ids), "style": style, "neg_type": neg_type}
 
     @staticmethod
     def split_ids(image_ids) -> list:
@@ -433,8 +536,10 @@ class Store:
             reasons = {"solid": "纯色/近纯色", "duplicate": "同图变体，仅保留一个代表", "label_conflict": "同图身份标签冲突", "split_conflict": "连接了不同历史划分"}
             r["status"] = "已移出训练库" if r["removed"] else reasons.get(r["reason"], "跳过" if r["label"] == "skip" else "可用")
             r["label_text"] = {"self": f"是{character}", "other": f"不是{character}", "skip": "跳过"}.get(r["label"], "未标注")
+            r["style_text"] = STYLES.get(r.get("style") or "", "未标注类型")
+            r["neg_type_text"] = NEG_TYPES.get(r.get("neg_type") or "", "")
             r["trained"] = index.seen(r)
-            r["training_text"] = "当前模型已训练" if r["trained"] else "验证集" if r["split"] == "val" else "测试集" if r["split"] == "test" else "待训练"
+            r["training_text"] = "当前模型已训练" if r["trained"] else "评估集" if r["split"] == "eval" else "验证集" if r["split"] == "val" else "测试集" if r["split"] == "test" else "待训练"
             prediction = predictions.get(r["id"])
             if prediction:
                 predicted = "self" if prediction["score"] >= threshold else "other"
@@ -477,18 +582,295 @@ class Store:
             candidates = db.execute("SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id WHERE i.character=? AND i.removed=0 AND i.reason='' AND i.label IN ('self','other') AND (g.split='train' OR g.split IS NULL)", (character,)).fetchall()
         index = SourceIndex(sources)
         pending = sum(not index.seen(r) for r in candidates)
+        smallest = min(counts.values())
+        # 档位来自受控实验（docs/experiments-sample-size.md）：20–49 组正例时
+        # 0.60 阈值下的精确率只有 0.52–0.64，即约三分之一到一半的提示是错的。
+        level = (
+            "insufficient" if smallest < 20
+            else "thin" if smallest < 50
+            else "usable" if smallest < 100
+            else "good"
+        )
+        advice = {
+            "insufficient": "每类至少 20 个可训练独立图组才能开始训练。",
+            "thin": "样本偏少：这个量级的误报较多。补到 100 组，并优先补你实际会遇到的图（群聊截图、画师同人），只用官方立绘会在同人图上几乎认不出。",
+            "usable": "可用，但误报仍偏高。再补一些群里常见的正例图，比只加正例数量更有效；负例也要覆盖表情包和其他角色。",
+            "good": "样本量足够。继续增加仍是净收益，但边际变小。",
+        }[level]
+        negative_thin = counts["self"] >= 20 and counts["other"] < 2 * counts["self"]
+        coverage = self.style_coverage(character)
+        missing = [row["label"] for row in coverage if row["verdict"] == "missing"]
+        eval_groups = sum(row["eval"] for row in coverage)
+        labelled = sum(row["train"] + row["eval"] + row["other"] for row in coverage if row["style"])
+        coverage_text = " · ".join(f"{row['label']} {row['train']}" for row in coverage if row["style"])
         return {
             "can_train": min(counts.values()) >= 20,
             "has_model": bool(active),
             "pending_count": pending,
+            "level": level,
+            "advice": advice,
+            "negative_thin": negative_thin,
+            "coverage": coverage,
+            "coverage_text": coverage_text,
+            "coverage_missing": missing,
+            "eval_groups": eval_groups,
+            # Only computed when it can answer something: "重建会付出什么代价".
+            # Skipped when an eval set exists or nothing is tagged (no plan possible).
+            "eval_plan": None if eval_groups or not labelled else self.eval_plan(character),
             "summary": f"「{character}」可训练独立图组：是 {counts['self']} / 不是 {counts['other']}。每类至少20组，重复变体只算一组。",
             "groups": counts,
         }
+
+    def style_coverage(self, character: str) -> list:
+        """训练集/评估集各档的实际组数。空档返回 verdict=missing，永远可输出。"""
+        character = self.validate_character(character)
+        with self.db() as db:
+            rows = db.execute(
+                "SELECT i.style,g.split,COUNT(DISTINCT i.group_id) AS count FROM images i "
+                "JOIN groups g ON g.id=i.group_id WHERE i.character=? AND i.removed=0 AND i.reason='' "
+                "AND i.label='self' GROUP BY i.style,g.split",
+                (character,),
+            ).fetchall()
+        counts: dict = {}
+        for row in rows:
+            bucket = counts.setdefault(row["style"] or "", {"train": 0, "eval": 0, "other": 0})
+            if row["split"] == "eval":
+                bucket["eval"] += row["count"]
+            elif row["split"] in ("train", None, ""):
+                # Unassigned rows are trainable, not "other": coverage is asked
+                # before the first freeze as often as after it.
+                bucket["train"] += row["count"]
+            else:
+                bucket["other"] += row["count"]
+        result = []
+        for style, label in STYLES.items():
+            bucket = counts.get(style, {"train": 0, "eval": 0, "other": 0})
+            verdict = "missing" if bucket["train"] + bucket["eval"] == 0 else (
+                "eval_only" if bucket["train"] == 0 else "covered"
+            )
+            result.append(
+                {
+                    "style": style,
+                    "label": label,
+                    "train": bucket["train"],
+                    "eval": bucket["eval"],
+                    "other": bucket["other"],
+                    "verdict": verdict,
+                }
+            )
+        untagged = counts.get("", {"train": 0, "eval": 0, "other": 0})
+        result.append(
+            {
+                "style": "",
+                "label": "未标注",
+                "train": untagged["train"],
+                "eval": untagged["eval"],
+                "other": untagged["other"],
+                "verdict": "untagged" if sum(untagged.values()) else "empty",
+            }
+        )
+        return result
+
+    def eval_plan(self, character: str) -> dict:
+        """What `rebuild_eval` would take, without writing anything.
+
+        Used by the training page so the confirmation can state the real cost
+        (how many images and from which split) instead of a vague warning.
+        """
+        character = self.validate_character(character)
+        with self.db() as db:
+            rows = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id "
+                    "WHERE i.character=? AND i.removed=0 AND i.reason='' AND i.label IN ('self','other') ORDER BY i.id",
+                    (character,),
+                )
+            ]
+        if not rows:
+            return {"groups": 0, "by_style": {}, "by_neg": {}, "from_train": 0, "from_test": 0,
+                    "from_val": 0, "from_other": 0}
+        picked, unisolated = self._pick_eval_groups(rows)
+        first: dict = {}
+        for row in rows:
+            first.setdefault(row["group_id"], row)
+        by_style: dict = {}
+        by_neg: dict = {}
+        counts = {"from_train": 0, "from_test": 0, "from_val": 0, "from_other": 0}
+        for group in picked:
+            row = first[group]
+            if row["label"] == "self" and row["style"]:
+                by_style[row["style"]] = by_style.get(row["style"], 0) + 1
+            elif row["label"] == "other" and row["neg_type"]:
+                by_neg[row["neg_type"]] = by_neg.get(row["neg_type"], 0) + 1
+            key = {"train": "from_train", "test": "from_test", "val": "from_val"}.get(row["split"], "from_other")
+            counts[key] += 1
+        return {"groups": len(picked), "by_style": by_style, "by_neg": by_neg, "unisolated": unisolated, **counts}
+
+    def _ensure_eval(self, db: sqlite3.Connection, character: str) -> dict:
+        """Build the fixed evaluation set once, using only unassigned groups.
+
+        Only `split IS NULL` rows participate: an install that already trained on
+        0.5.x keeps every historical assignment byte-for-byte, which is what makes
+        old reports comparable. Those installs simply get no eval set until an
+        admin explicitly rebuilds one.
+        """
+        exists = db.execute(
+            "SELECT 1 FROM groups g JOIN images i ON i.group_id=g.id WHERE i.character=? AND g.split='eval' LIMIT 1",
+            (character,),
+        ).fetchone()
+        if exists:
+            return {"built": False, "reason": "exists"}
+        rows = [
+            dict(r)
+            for r in db.execute(
+                "SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id "
+                "WHERE i.character=? AND i.removed=0 AND i.reason='' AND i.label IN ('self','other') "
+                "AND g.split IS NULL ORDER BY i.id",
+                (character,),
+            )
+        ]
+        if not rows:
+            return {"built": False, "reason": "nothing_free"}
+        picked, unisolated = self._pick_eval_groups(rows)
+        for group in picked:
+            db.execute("UPDATE groups SET split='eval' WHERE id=?", (group,))
+        if picked:
+            db.execute(
+                "INSERT OR REPLACE INTO settings VALUES (?,?)",
+                (f"eval_built:{character}", dump({"groups": len(picked), "created": time.time(), "unisolated": unisolated})),
+            )
+        return {
+            "built": bool(picked),
+            "reason": "created" if picked else "no_style",
+            "groups": len(picked),
+            "unisolated": unisolated,
+        }
+
+    @staticmethod
+    def _pick_eval_groups(
+        rows: list,
+        per_style: int = EVAL_PER_STYLE,
+        neg_per_kind: int = EVAL_PER_NEG_KIND,
+        seed: int = 2026,
+    ) -> tuple:
+        """Pick whole (style, width, height) batches; a batch never crosses sides.
+
+        Batch identity is a proxy for source: `洛天依4` had 47/151 images at
+        1242×1863, and splitting that batch randomly is what made 0.5.8's 82%
+        look better than it is. The budget is per medium, but the reserve is per
+        label — a library can spare 25 images for evaluation only if it keeps the
+        20 groups that training requires.
+
+        A batch is taken whole unless it is the only batch for that medium and
+        would break the reserve; then it is sampled inside and reported as
+        unisolated rather than silently pretending the isolation held.
+        """
+        rng = random.Random(seed)
+        representatives: dict = {}
+        for row in rows:
+            representatives.setdefault(row["group_id"], row)
+        picked: list = []
+        unisolated: list = []
+        for label, field, wanted, values in (
+            ("self", "style", per_style, tuple(STYLES)),
+            ("other", "neg_type", neg_per_kind, tuple(NEG_TYPES)),
+        ):
+            cohort = [r for r in representatives.values() if r["label"] == label and r[field]]
+            budget = max(0, len(cohort) - EVAL_MIN_TRAIN)
+            taken = 0
+            # Rarest medium first: a 3-image bucket must not be crowded out by the
+            # dominant one, because it is exactly the bucket most likely to be the
+            # weak spot the report is supposed to find.
+            order = sorted(values, key=lambda value: sum(1 for r in cohort if r[field] == value))
+            for value in order:
+                if budget - taken <= 0:
+                    break
+                subset = [r for r in cohort if r[field] == value]
+                if not subset:
+                    continue
+                style_budget = min(wanted, budget - taken)
+                batches: dict = {}
+                for row in subset:
+                    batches.setdefault((row["width"], row["height"]), []).append(row)
+                keys = sorted(batches, key=lambda key: (len(batches[key]), key))
+                rng.shuffle(keys)
+                keys.sort(key=lambda key: len(batches[key]))
+                style_taken = 0
+                for key in keys:
+                    if style_taken >= style_budget:
+                        break
+                    batch = batches[key]
+                    if len(batch) <= style_budget - style_taken:
+                        picked.extend(row["group_id"] for row in batch)
+                        style_taken += len(batch)
+                        continue
+                    if style_taken == 0:
+                        sample = rng.sample(batch, style_budget)
+                        picked.extend(row["group_id"] for row in sample)
+                        unisolated.append(
+                            {"label": label, "style": value, "batch": len(batch), "taken": style_budget}
+                        )
+                        style_taken = style_budget
+                taken += style_taken
+        return list(dict.fromkeys(picked)), unisolated
+
+    def rebuild_eval(
+        self,
+        character: str,
+        per_style: int = EVAL_PER_STYLE,
+        neg_per_kind: int = EVAL_PER_NEG_KIND,
+        seed: int | None = None,
+    ) -> dict:
+        """Explicit admin action: re-pick the eval set from all eligible groups.
+
+        Unlike the automatic build this may take groups that were already assigned,
+        so reports before/after are not comparable — the report says so.
+        """
+        character = self.validate_character(character)
+        if type(per_style) is not int or not 5 <= per_style <= 200:
+            raise ValueError("每档评估张数必须在 5 到 200 之间")
+        with self.db() as db:
+            rows = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id "
+                    "WHERE i.character=? AND i.removed=0 AND i.reason='' AND i.label IN ('self','other') ORDER BY i.id",
+                    (character,),
+                )
+            ]
+        if not rows:
+            raise ValueError("该角色还没有可用于评估的图片")
+        # Deterministic by default: `eval_plan` promises the user an exact cost in the
+        # confirmation dialog, so the pick that follows must be the same pick.
+        picked, unisolated = self._pick_eval_groups(rows, per_style, neg_per_kind, 2026 if seed is None else seed)
+        if not picked:
+            raise ValueError("没有已标注内容类型的图片，无法建立评估集")
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            # Release the old eval set first: otherwise a rebuild only ever grows it.
+            db.execute(
+                "UPDATE groups SET split=NULL WHERE split='eval' AND id IN "
+                "(SELECT group_id FROM images WHERE character=?)",
+                (character,),
+            )
+            db.executemany("UPDATE groups SET split=? WHERE id=?", [("eval", group) for group in picked])
+            db.execute(
+                "INSERT OR REPLACE INTO settings VALUES (?,?)",
+                (
+                    f"eval_built:{character}",
+                    dump({"groups": len(picked), "created": time.time(), "rebuilt": True, "unisolated": unisolated}),
+                ),
+            )
+        return {"groups": len(picked), "rebuilt": True, "unisolated": unisolated}
 
     def freeze(self, db: sqlite3.Connection, job_id: str, mode: str, device: str, character: str, input_size: int = 320) -> dict:
         character = self.validate_character(character)
         if type(input_size) is not int or input_size not in {224, 320, 448}:
             raise ValueError("图片尺寸必须为224、320或448")
+        # The fixed eval set is picked before splitting: it must never be a source
+        # of training rows, and it must stay identical across training runs.
+        eval_info = self._ensure_eval(db, character)
         rows = [
             dict(r)
             for r in db.execute(
@@ -512,15 +894,17 @@ class Store:
         rng = random.Random(42)
         for label in ("self", "other"):
             cohort = [r for r in rows if r["label"] == label]
-            if len(cohort) < 20:
+            # Eval rows are never trained, so they must not inflate the targets.
+            trainable = [r for r in cohort if r["split"] != "eval"]
+            if len(trainable) < 20:
                 name = ("是" if label == "self" else "不是") + character
-                raise ValueError(f"「{character}」的“{name}”至少需要20个可训练独立图片组，当前{len(cohort)}；请上传或补标该类图片")
-            new = sorted((r for r in cohort if not r["split"]), key=lambda r: r["group_id"])
+                raise ValueError(f"「{character}」的“{name}”至少需要20个可训练独立图片组，当前{len(trainable)}；请上传或补标该类图片")
+            new = sorted((r for r in trainable if not r["split"]), key=lambda r: r["group_id"])
             rng.shuffle(new)
             # Fill cumulative targets while preserving every existing assignment.
-            targets = {"test": max(2, round(len(cohort) * 0.15)), "val": max(2, round(len(cohort) * 0.15))}
-            targets["train"] = len(cohort) - targets["test"] - targets["val"]
-            counts = {s: sum(r["split"] == s for r in cohort) for s in targets}
+            targets = {"test": max(2, round(len(trainable) * 0.15)), "val": max(2, round(len(trainable) * 0.15))}
+            targets["train"] = len(trainable) - targets["test"] - targets["val"]
+            counts = {s: sum(r["split"] == s for r in trainable) for s in targets}
             for r in new:
                 split = max(targets, key=lambda s: targets[s] - counts[s])
                 r["split"] = split
@@ -553,12 +937,14 @@ class Store:
             "device": device,
             "input_size": input_size,
             "preprocessing": "resize_before_augment",
+            "augmentation": "strong",
             "training_policy": "new_only" if parent else "all",
             "trained_sources": trained_sources,
             "seed": 42,
             "parent": parent,
             "parent_sha": parent_record[0] if parent_record else "",
             "character": character,
+            "eval_build": eval_info,
             "images": rows,
             "held_truth": held_truth,
             "comparable_to_previous": not old_truth or held_truth == old_truth,

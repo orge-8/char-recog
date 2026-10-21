@@ -1,6 +1,6 @@
 # 工程验收记录
 
-2026-10-09，本地 Windows、Python 3.13.7、AMD Ryzen 9 5900XT，CPU 限制为4线程。测试使用临时合成图片，不使用个人图库或既有角色模型。
+2026-10-09，本地 Windows、Python 3.13，CPU 限制为 4 线程。测试使用临时合成图片，不使用个人图库或既有角色模型。
 
 ## 完整 CPU 流程
 
@@ -279,7 +279,9 @@ python -m pytest tests -q
 - SDK **2.12.x** 未单独验证。它落在声明区间内，按语义化版本视为兼容，但没有实机记录。
 - `2.14.0` 及以上、宿主 `1.4.0` 及以上**不在**声明范围内，宿主会拒绝加载。若在那些版本上跑通，需要再发一版放宽 `max_version`。
 
-### 自查脚本的两处需人工判读
+### 自查脚本的两处需人工判读（外部脚本，本仓库不含）
+
+> 下面的 `scripts/check_submission.py` 是插件中心的外部自查脚本，不在本仓库，无法直接复跑；这段保留的是当时的输出与判断依据。
 
 ```text
 python scripts/check_submission.py . --plugin-id org.civetc.char-recog
@@ -288,3 +290,48 @@ python scripts/check_submission.py . --plugin-id org.civetc.char-recog
 
 - `[FAIL] eval/exec 用户输入 —— 命中: recog/model.py` 是**误报**。三处命中全是 `model.eval()`（`recog/model.py:62/93/198`），即 PyTorch 切换推理模式；脚本用的 `\b(eval|exec)\s*\(` 无法区分。无动态执行、无 `eval()` 调用，不需要改动。
 - `[WARN] 依赖声明完整性` 指出 `torch` / `torchvision` / `psutil` 未列入 `dependencies`：这是刻意的，插件不随包安装 PyTorch，而是由环境页在管理员确认后装入独立覆盖层（见「依赖覆盖层」小节）。把这几个写进 `dependencies` 会让宿主在安装插件时强制拉取数 GB 的 torch。
+
+## 2026-10-18 · 0.5.0 样本量受控实验与默认增广
+
+完整方法、全部表格与失效边界见 [docs/experiments-sample-size.md](docs/experiments-sample-size.md)。这一节只记录结论与可复核的入口。
+
+### 实验规模
+
+真实素材（`Ori` 洛天依 264 张去重后正例、相似角色 866、异画风 525、非角色 24），固定 128 张测试集（40 正 / 94 负）在全部 20 个配置中逐张相同，配对比较。**20 次训练**，累计约 100 分钟 CPU，每次走插件真实 `Store.freeze()` + `model.train()`，超参不改。
+
+### 结论摘要
+
+| 维度 | 结论 |
+|---|---|
+| 数量 | 每类 20 组正例：精确率 0.52；50 组 0.64；100 组 0.66；200 组 0.84 |
+| 正负比 | 50 正 + 200 负（1:4）→ 0.799，超过 100 正 + 100 负（0.661）；召回不降 |
+| 负例来源 | 只用相似角色 vs 混入异画风：AUC 0.901 vs 0.906，无可分辨差异 |
+| 增广 | 裁剪+翻转：F1 0.659→0.723（N=50）、0.716→0.794（N=100） |
+| 硬负例 | 训练负例最高分仅 0.016，无素材可挖；F1 +0.027 与「多 5 张重复样本」不可区分 |
+| 验证集 | 3 张/类时自动建议阈值从 0.54 漂到 0.40，校准后 F1 基本不变 |
+
+### 实装与复核
+
+- `snapshot["augmentation"] = "strong"` 由 `Store.freeze()` 写入，`model.train()` 透传给 `Dataset`；缺少该字段的旧快照保持只有颜色抖动。
+- 生产路径重测 N=100 增广档：AUC 0.934 / 精确率 0.685 / 召回 0.925 / F1 0.787，与实验夹具有 0.02 以内差异。
+- 实装时发现并修掉一个真实缺陷：torchvision 的 `RandomResizedCrop` 对 PIL 输入返回 PIL，直接送 `Normalize` 会 `TypeError`。`tests/test_input_size.py::test_strong_augmentation_keeps_shape_and_trains` 同时覆盖该回归与整轮训练审计。
+
+### 仍未验证
+
+1. 只有一个正类角色，外观高度相近的角色（举例：同为蓝发双马尾的另一角色）难度会更高，绝对数字不可直接搬运。
+2. 测试集 40 张正例，精确率 95% 区间约 ±0.15；差值小于 0.10 的条目不作结论。
+3. 非角色切片仅 14 张测试图，只能当探针。
+4. 全部在 CPU 上跑，未验证 GPU 与增量训练是否继承相同结论。
+
+5. 异画风负例池（`Thumb`）经模型复检含 22 张目标角色图（≥0.60），因此上表精确率被低估约 0.02–0.04；详见 `docs/experiments-sample-size.md` 的「已知缺陷」。
+
+## 2026-10-20 复测（0.5.14）
+
+同一开发环境，完整依赖（含 CPU 版 PyTorch）：`pytest tests` → **179 passed / 1 skipped（588s）**。
+
+本轮新增的覆盖点：
+
+- 内容类型（`style` / `neg_type`）迁移与校验，老库迁移后划分逐行不变（`tests/test_eval_set.py`）。
+- 固定评估集：批次整批归边、稀有类型优先、每类预留 20 组训练、重跑成员不变。
+- 分档指标与建议文案：`n < 5` 标记样本不足，不输出百分比（`tests/test_style_metrics.py`）。
+- 宿主 WebUI 限额：页面数、每页 action/query 上限、参数数、`uploads` 绑定、页面体积（`tests/test_webui_host_limits.py`）。

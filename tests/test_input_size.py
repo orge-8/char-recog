@@ -71,3 +71,36 @@ def test_training_batch_may_contain_only_one_class(tmp_path):
     report = train(tmp_path, snapshot, lambda p: None, lambda: False, max_epochs=1)
     assert report["audit"]["passed"]
     assert report["counts"]["train"] == 14
+
+
+def test_strong_augmentation_keeps_shape_and_trains(tmp_path):
+    """随机裁剪 + 翻转必须产出张量：torchvision 的 RandomResizedCrop 对 PIL 输入
+    返回的仍是 PIL，直接送 Normalize 会报 TypeError（0.5.0 开发时踩过）。"""
+    Image.new("RGB", (900, 600), "orange").save(tmp_path / "image.png")
+    rows = [{"path": "image.png", "label": "self"}]
+    strong = Dataset(tmp_path, rows, True, 320, True, "strong")
+    tensor, label = strong[0]
+    assert tensor.shape == (3, 320, 320) and label == 1
+    assert strong.augmentation == "strong"
+    assert strong.strong.transforms[0].scale == (0.6, 1.0)
+
+    legacy = Dataset(tmp_path, rows, True, 320, True, "jitter")
+    assert legacy[0][0].shape == (3, 320, 320)
+
+    # 端到端：整轮训练 + 审计在 strong 档位下必须通过。
+    store = corpus(tmp_path)
+    with store.db() as db:
+        snapshot = store.freeze(db, "aug", "fresh", "cpu", CHAR, 320)
+    assert snapshot["augmentation"] == "strong"
+    directory = tmp_path / "jobs" / "aug"
+    directory.mkdir()
+    report = train(tmp_path, snapshot, lambda p: None, lambda: False, max_epochs=1)
+    assert report["audit"]["passed"]
+
+
+def test_legacy_snapshot_without_augmentation_key_stays_on_jitter(tmp_path):
+    Image.new("RGB", (640, 480), "orange").save(tmp_path / "image.png")
+    dataset = Dataset(tmp_path, [{"path": "image.png", "label": "other"}], True, 224, True,
+                      {}.get("augmentation", "jitter"))
+    assert dataset.augmentation == "jitter"
+    assert dataset[0][0].shape == (3, 224, 224)

@@ -21,8 +21,12 @@ from .recog.scores import (
     DEFAULT_THRESHOLD,
     EVALUATION_THRESHOLD,
     JUDGMENT_BAND,
+    STYLE_LABELS,
+    NEG_LABELS,
+    by_style,
     metrics,
     select_top,
+    style_advice,
     suggest_threshold,
     sweep,
 )
@@ -164,7 +168,9 @@ class CharacterRecognition(MaiBotPlugin):
         return self.service.store.validate_character(character)
 
     @API("self_upload", version="1")
-    async def upload(self, upload_id: str, character: str, upload_label: str = "self") -> dict:
+    async def upload(
+        self, upload_id: str, character: str, upload_label: str = "self", upload_style: str = "", upload_neg_type: str = ""
+    ) -> dict:
         if upload_label not in {"self", "other"}:
             return {"success": False, "error": "上传身份必须为是角色或不是角色"}
         try:
@@ -172,7 +178,9 @@ class CharacterRecognition(MaiBotPlugin):
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
         claimed = await self.ctx.webui.claim_upload(upload_id)
-        result = await self._action(self.service.store.ingest, Path(claimed["path"]), upload_label, character)
+        result = await self._action(
+            self.service.store.ingest, Path(claimed["path"]), upload_label, character, upload_style, upload_neg_type
+        )
         if result.get("already_exists"):
             result["message"] = "图片已存在，复用原标注"
         return result
@@ -247,6 +255,23 @@ class CharacterRecognition(MaiBotPlugin):
     @API("self_images_batch_remove", version="1")
     async def batch_remove(self, image_ids: str) -> dict:
         return await self.batch_images(image_ids, "remove")
+
+    @API("self_image_style", version="1")
+    async def image_style(self, image_id: str, style: str = "", neg_type: str = "") -> dict:
+        return await self._action(self.service.store.set_style, image_id, style, neg_type or None)
+
+    @API("self_images_batch_style", version="1")
+    async def batch_style(self, image_ids: str, style: str | None = None, neg_type: str | None = None) -> dict:
+        # Omitted parameter = leave the field alone; "" = clear it.
+        return await self._action(self.service.store.batch_style, image_ids, style, neg_type)
+
+    @API("self_eval_rebuild", version="1")
+    async def eval_rebuild(self, character: str = "") -> dict:
+        try:
+            character = self._validate_character(character)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return await self._action(self.service.store.rebuild_eval, character)
 
     @API("self_training_submit", version="1")
     async def submit(
@@ -448,6 +473,45 @@ class CharacterRecognition(MaiBotPlugin):
 
         validation_metrics = at_gate(validation_predictions, stored_selection.get("validation") or report["test"])
         test_metrics = at_gate(test_predictions, report["test"])
+        # Per-medium numbers come from the fixed eval set only: it is the one split
+        # whose members never change between runs, so the table stays comparable.
+        eval_predictions = report.get("eval_predictions") or []
+        eval_metrics = at_gate(eval_predictions, report.get("eval")) if eval_predictions else None
+        style_rows = by_style(eval_predictions, current) if eval_predictions else []
+        try:
+            coverage = await offload(self.service.store.style_coverage, character)
+        except (ValueError, OSError):
+            coverage = []
+        labelled = sum(row["train"] + row["eval"] + row["other"] for row in coverage if row["style"])
+        plan = None
+        # getattr: this is read-only analytics inside a report; a store object that
+        # predates the method (or a host test double) must degrade, not blank the page.
+        planner = getattr(self.service.store, "eval_plan", None)
+        if not eval_predictions and planner is not None:
+            # No eval set: say what rebuilding would cost instead of asking the user
+            # to re-do work they already did.
+            try:
+                plan = await offload(planner, character)
+            except (ValueError, OSError):
+                plan = None
+        styles = {
+            "rows": style_rows,
+            "coverage": coverage,
+            "advice": style_advice(
+                coverage,
+                style_rows,
+                evaluated=bool(eval_predictions),
+                labelled=labelled,
+                buildable=(plan or {}).get("groups", 0),
+            ),
+            "evaluated": bool(eval_predictions),
+            "eval_count": len(eval_predictions),
+            "eval_metrics": eval_metrics,
+            "labelled": labelled,
+            "plan": plan,
+            "labels": STYLE_LABELS,
+            "neg_labels": NEG_LABELS,
+        }
         suggestion = None
         sweep_rows = []
         if validation_predictions:
@@ -497,12 +561,24 @@ class CharacterRecognition(MaiBotPlugin):
             f"指标按当前判定阈值 {current:.2f} 重算（训练时评测口径 {selection_threshold:.2f}）\n"
             f"核验：{'通过' if report['audit']['passed'] else '未通过'}"
         )
+        if style_rows:
+            parts = [
+                f"{row['label']} {row['recall']:.0%}" if not row["unreliable"] else f"{row['label']} 样本不足(n={row['n']})"
+                for row in style_rows
+                if row["positives"]
+            ]
+            if parts:
+                readable += "\n分类型（评估集）：" + " · ".join(parts)
+            readable += "\n" + styles["advice"]
+        else:
+            readable += "\n" + styles["advice"]
         for row_ in rows:
             for field in ("recall", "f1", "accuracy", "other_recall", "balanced_accuracy"):
                 row_[field] = f"{row_[field]:.1%}"
         return {
             "summary": readable,
             "metrics": rows,
+            "styles": styles,
             "technical": json.dumps(summary, ensure_ascii=False),
             "threshold": {
                 "current": current,

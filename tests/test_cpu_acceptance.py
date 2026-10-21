@@ -24,7 +24,8 @@ def wait(service, job, timeout=240):
     while time.monotonic() - started < timeout:
         row = service.store.job(job)
         if row["state"] in {"complete", "failed", "cancelled"}:
-            assert row["state"] == "complete", row
+            # Surface the worker error: the bare row truncates it in CI logs.
+            assert row["state"] == "complete", row.get("error") or row
             return service.store.report(job)
         time.sleep(0.5)
     raise AssertionError("CPU training timeout")

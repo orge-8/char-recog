@@ -37,6 +37,7 @@ def build(results, limits=None, seen=None):
     plugin._image_cache = {}
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
+            style_coverage=lambda character: [],
             active_characters=lambda: characters,
             active=lambda character: "v1",
             thresholds=lambda: dict(state["limits"]),
@@ -65,8 +66,14 @@ def test_prompts_only_the_highest_accepted_character():
 
 
 def test_close_margin_prompts_nobody():
-    plugin, _, _ = build([hit("A", 0.85), hit("B", 0.80)], {"A": 0.6, "B": 0.6})
+    plugin, _, _ = build([hit("A", 0.85), hit("B", 0.84)], {"A": 0.6, "B": 0.6})
     assert annotate(plugin) == []
+
+
+def test_five_point_lead_still_prompts_the_winner():
+    plugin, _, _ = build([hit("A", 0.85), hit("B", 0.80)], {"A": 0.6, "B": 0.6})
+    texts = annotate(plugin)
+    assert len(texts) == 1 and "A" in texts[0]
 
 
 def test_tie_prompts_nobody():
@@ -167,6 +174,7 @@ def test_report_metrics_follow_the_current_gate():
     plugin = module.create_plugin()
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
+            style_coverage=lambda character: [],
             job=lambda job_id: {"character": CHAR},
             report=lambda job_id: report,
             threshold=lambda character: 0.6,
@@ -204,6 +212,7 @@ def test_report_without_validation_predictions_still_renders():
     plugin = module.create_plugin()
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
+            style_coverage=lambda character: [],
             job=lambda job_id: {"character": CHAR},
             report=lambda job_id: report,
             threshold=lambda character: 0.6,

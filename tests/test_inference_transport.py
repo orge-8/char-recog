@@ -187,12 +187,23 @@ def test_warmup_failure_backs_off(tmp_path: Path, monkeypatch):
         return worker(service, "import sys;sys.exit(1)")
 
     monkeypatch.setattr(service, "_spawn", spawn)
+
+    def until_cooling(limit: float = 15.0) -> str:
+        """失败是后台线程记的，机器忙时 2 秒未必够 —— 等状态落到 cooling，而不是等固定时长。"""
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            status = service.request({"operation": "load"}, timeout=2)["status"]
+            if status != "warming":
+                return status
+            time.sleep(0.2)
+        return status
+
     try:
-        assert service.request({"operation": "load"}, timeout=2)["status"] == "cooling"
+        assert until_cooling() == "cooling"
         with service._state:
             service.breaker_until = 0.0
             service.retry_at = 0.0
-        assert service.request({"operation": "load"}, timeout=2)["status"] == "cooling"
+        assert until_cooling() == "cooling"
         assert service.warm_failures == 2
         remaining = service.retry_at - time.monotonic()
         assert 60 <= remaining <= 110, remaining
