@@ -34,6 +34,8 @@ TEXT_MARKS = TEXT_LABELS
 EVAL_PER_STYLE = 25
 EVAL_PER_NEG_KIND = 15
 EVAL_MIN_COUNT = STYLE_MIN_COUNT
+# 聊天捕获上限：待确认队列不能变成第二个图库。
+CAPTURE_LIMIT = 100
 # 每类留至少这么多组给训练：这是插件能训练的下限，评估集不能把它吃掉。
 EVAL_MIN_TRAIN = 20
 
@@ -100,7 +102,7 @@ class Store:
         with self.db() as db:
             db.executescript("""
               PRAGMA journal_mode=WAL;
-              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', style TEXT NOT NULL DEFAULT '', neg_type TEXT NOT NULL DEFAULT '', has_text TEXT NOT NULL DEFAULT '');
+              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', style TEXT NOT NULL DEFAULT '', neg_type TEXT NOT NULL DEFAULT '', has_text TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', model_score REAL);
               CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, split TEXT);
               CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request_key TEXT UNIQUE, state TEXT, pid INTEGER, error TEXT, created REAL, snapshot_sha TEXT, character TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '', input_size INTEGER);
               CREATE UNIQUE INDEX IF NOT EXISTS one_training ON jobs((1)) WHERE state IN ('queued','running','cancelling');
@@ -132,6 +134,13 @@ class Store:
                 db.execute("ALTER TABLE images ADD COLUMN neg_type TEXT NOT NULL DEFAULT ''")
             if "has_text" not in columns:
                 db.execute("ALTER TABLE images ADD COLUMN has_text TEXT NOT NULL DEFAULT ''")
+            # 0.5.20: where an image came from, and what the model said when it was
+            # captured. A chat-captured image is *not* ground truth, so the score is
+            # kept next to it instead of the label.
+            if "source" not in columns:
+                db.execute("ALTER TABLE images ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+            if "model_score" not in columns:
+                db.execute("ALTER TABLE images ADD COLUMN model_score REAL")
             # 0.5.18: 「图文/梗图」was a fourth medium that mixed画法 with叠加层. The
             # information it carried (text on the image) moves to has_text; the
             # medium stays empty because a meme is usually平涂 but we cannot tell.
@@ -276,6 +285,8 @@ class Store:
         style: str = "",
         neg_type: str = "",
         has_text: str = "",
+        source: str = "",
+        model_score: float | None = None,
     ) -> dict:
         if label not in {None, "self", "other"}:
             raise ValueError("上传身份必须为是Bot或不是Bot")
@@ -333,7 +344,7 @@ class Store:
                     db.execute("UPDATE groups SET split=? WHERE id=?", (next(iter(splits)), group))
             shutil.move(path, destination)
             db.execute(
-                "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,style,neg_type,has_text) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
+                "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,style,neg_type,has_text,source,model_score) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",
                 (
                     ident,
                     str(destination.relative_to(self.root)),
@@ -351,6 +362,8 @@ class Store:
                     style,
                     neg_type,
                     has_text,
+                    source,
+                    model_score,
                 ),
             )
             self._reconcile(db, group)
@@ -547,16 +560,29 @@ class Store:
         """Compatibility wrapper; hot paths build a SourceIndex instead."""
         return SourceIndex(sources).seen(row)
 
-    def images(self, page: int = 1, view: str = "all", job_id: str = "", character: str = "") -> dict:
+    def images(
+        self,
+        page: int = 1,
+        view: str = "all",
+        job_id: str = "",
+        character: str = "",
+        style: str = "",
+        has_text: str = "",
+    ) -> dict:
         character = self.validate_character(character)
         threshold = self.threshold(character)
-        if page < 1 or view not in {"all", "eligible", "excluded", "unlabelled", "errors", "removed"}:
+        style = self.validate_style(style)
+        has_text = self.validate_has_text(has_text)
+        if page < 1 or view not in {"all", "eligible", "excluded", "unlabelled", "untyped", "errors", "removed"}:
             raise ValueError("无效分页")
         where = {
             "all": "i.removed=0",
             "eligible": "i.removed=0 AND i.reason='' AND i.label IN ('self','other')",
             "excluded": "(i.removed=1 OR i.reason!='' OR i.label='skip')",
             "unlabelled": "i.label IS NULL",
+            # 0.5.19: the medium tag exists but nothing can find the untagged ones,
+            # which is exactly the list an admin needs to work through.
+            "untyped": "i.removed=0 AND i.reason='' AND i.label IN ('self','other') AND i.style=''",
             "errors": "1",
             "removed": "i.removed=1",
         }[view] + " AND i.character=?"
@@ -589,6 +615,12 @@ class Store:
             else:
                 where = "0"
                 parameters = []
+        if style:
+            where += " AND i.style=?"
+            parameters = [*parameters, style]
+        if has_text:
+            where += " AND i.has_text=?"
+            parameters = [*parameters, has_text]
         with self.db() as db:
             sources = self.trained_sources(db, self.active(character))
             total = db.execute(f"SELECT COUNT(*) FROM images i WHERE {where}", parameters).fetchone()[0]
@@ -606,6 +638,14 @@ class Store:
             r["style_text"] = STYLES.get(r.get("style") or "", "未标注类型")
             r["neg_type_text"] = NEG_TYPES.get(r.get("neg_type") or "", "")
             r["has_text_text"] = TEXT_MARKS.get(r.get("has_text") or "", "")
+            r["source_text"] = {"chat": "聊天捕获", "webui": "网页上传", "test": "识别测试"}.get(
+                r.get("source") or "", ""
+            )
+            r["captured_text"] = (
+                f"捕获时得分 {r['model_score']:.3f}（不是真值，待确认）"
+                if r.get("model_score") is not None
+                else ""
+            )
             r["trained"] = index.seen(r)
             r["training_text"] = "当前模型已训练" if r["trained"] else "评估集" if r["split"] == "eval" else "验证集" if r["split"] == "val" else "测试集" if r["split"] == "test" else "待训练"
             prediction = predictions.get(r["id"])
@@ -635,6 +675,15 @@ class Store:
             "total": total,
             "pagination": {"page": page, "pages": max(1, (total + 23) // 24), "total": total},
         }
+
+    def capture_pending(self, character: str) -> int:
+        """How many chat-captured images still wait for a human label."""
+        character = self.validate_character(character)
+        with self.db() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM images WHERE character=? AND source='chat' AND label IS NULL AND removed=0",
+                (character,),
+            ).fetchone()[0]
 
     def training_readiness(self, character: str) -> dict:
         character = self.validate_character(character)
@@ -682,6 +731,7 @@ class Store:
             "coverage_text": coverage_text,
             "coverage_missing": missing,
             "eval_groups": eval_groups,
+            "capture_pending": self.capture_pending(character),
             # Only computed when it can answer something: "重建会付出什么代价".
             # Skipped when an eval set exists or nothing is tagged (no plan possible).
             "eval_plan": None if eval_groups or not labelled else self.eval_plan(character),

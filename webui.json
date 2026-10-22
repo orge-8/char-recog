@@ -32,6 +32,7 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
+                "untyped",
                 "errors",
                 "removed"
               ]
@@ -44,6 +45,23 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo"
+              ]
+            },
+            "has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no"
+              ]
             }
           }
         },
@@ -316,6 +334,7 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
+                "untyped",
                 "errors",
                 "removed"
               ]
@@ -328,6 +347,23 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo"
+              ]
+            },
+            "has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no"
+              ]
             }
           }
         },
@@ -581,6 +617,7 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
+                "untyped",
                 "errors",
                 "removed"
               ]
@@ -593,6 +630,23 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo"
+              ]
+            },
+            "has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no"
+              ]
             }
           }
         },
@@ -795,6 +849,7 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
+                "untyped",
                 "errors",
                 "removed"
               ]
@@ -807,6 +862,23 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo"
+              ]
+            },
+            "has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no"
+              ]
             }
           }
         },
@@ -922,6 +994,30 @@
               ]
             }
           }
+        },
+        "promote": {
+          "api": "self_result_promote",
+          "parameters": {
+            "result_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "label": {
+              "type": "string",
+              "required": true,
+              "choices": [
+                "self",
+                "other"
+              ]
+            }
+          },
+          "confirmation": "把这张测试图加入训练库并标注？"
         }
       },
       "uploads": {
@@ -961,6 +1057,7 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
+                "untyped",
                 "errors",
                 "removed"
               ]
@@ -973,6 +1070,23 @@
               "type": "string",
               "required": true,
               "max_length": 32
+            },
+            "style": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "flat",
+                "paint",
+                "photo"
+              ]
+            },
+            "has_text": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "yes",
+                "no"
+              ]
             }
           }
         },

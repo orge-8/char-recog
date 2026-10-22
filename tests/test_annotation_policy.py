@@ -10,6 +10,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+# QA 修复（gstack-qa-lead, 2026-10-22）：maibot_sdk 缺失时原先在收集阶段直接 ImportError
+# 中断整个 pytest 运行，改为显式 importorskip（与 test_tool.py 同一问题）。
+pytest.importorskip("maibot_sdk", reason="plugin.py 依赖宿主 SDK maibot_sdk，缺失时整模块跳过")
+
 spec = importlib.util.spec_from_file_location(
     "annotation_plugin_test",
     Path(__file__).parents[1] / "plugin.py",

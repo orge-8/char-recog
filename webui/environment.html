@@ -54,13 +54,14 @@
   <section class="section" id="images" role="region" aria-label="图片标注" hidden>
     <div class="intro row between"><button class="maibot-button maibot-button-primary" data-open-upload="library">＋ 上传图片</button></div>
     <div class="stats"><div class="stat maibot-card"><p class="label" id="self-label">是 Bot · 可训练图组</p><div class="number" id="self-count">—</div></div><div class="stat maibot-card"><p class="label" id="other-label">不是 Bot · 可训练图组</p><div class="number" id="other-count">—</div></div><div class="stat maibot-card"><p class="label">当前筛选图片</p><div class="number" id="image-count">—</div><p class="foot" id="image-source">每页最多 24 张</p></div></div>
-    <div class="toolbar"><div class="filters"><label for="image-filter">查看范围</label><select class="maibot-select" id="image-filter"><option value="all">全部图片</option><option value="eligible">可训练</option><option value="excluded">已排除</option><option value="unlabelled">未标注</option><option value="errors">指定任务错判</option><option value="removed">已删除 · 可恢复</option></select><button class="maibot-button small" id="return-library" hidden>返回图片库</button></div><div class="row"><button class="maibot-button small" id="select-page">全选本页</button><button class="maibot-button small" id="unselect-page">取消本页</button><button class="maibot-button small maibot-button-danger" data-action="remove_all">删除全部</button></div></div>
+    <div class="toolbar"><div class="filters"><label for="image-filter">查看范围</label><select class="maibot-select" id="image-filter"><option value="all">全部图片</option><option value="eligible">可训练</option><option value="excluded">已排除</option><option value="unlabelled">未标注</option><option value="untyped">未标注类型</option><option value="errors">指定任务错判</option><option value="removed">已删除 · 可恢复</option></select><label for="style-filter">内容类型</label><select class="maibot-select" id="style-filter"><option value="">全部</option><option value="flat">平涂/Q版</option><option value="paint">厚涂插画</option><option value="photo">实拍</option></select><label for="text-filter">文字</label><select class="maibot-select" id="text-filter"><option value="">全部</option><option value="yes">有文字</option><option value="no">无文字</option></select><button class="maibot-button small" id="return-library" hidden>返回图片库</button></div><div class="row"><button class="maibot-button small" id="select-page">全选本页</button><button class="maibot-button small" id="unselect-page">取消本页</button><button class="maibot-button small maibot-button-danger" data-action="remove_all">删除全部</button></div></div>
     <div id="selection-bar" class="selected-bar" hidden><span>已选择 <b id="selection-count">0</b> 张 <small>· 保留其他页的选择</small></span><div class="row"><button class="maibot-button small" data-batch="batch_positive">标为是 Bot</button><button class="maibot-button small" data-batch="batch_negative">标为不是 Bot</button><button class="maibot-button small maibot-button-danger" data-batch="batch_remove">删除选中</button><select id="batch-style" class="maibot-select" style="width:auto" aria-label="批量设置内容类型"><option value="">类型…</option><option value="flat">平涂/Q版</option><option value="paint">厚涂插画</option><option value="photo">实拍</option><option value="clear">清除类型</option></select><button class="maibot-button small" data-batch="batch_style">应用类型</button><select id="batch-text" class="maibot-select" style="width:auto" aria-label="批量设置文字叠加"><option value="">文字…</option><option value="yes">有文字</option><option value="no">无文字</option><option value="clear">清除文字标记</option></select><button class="maibot-button small" data-batch="batch_text">应用文字</button><select id="batch-neg" class="maibot-select" style="width:auto" aria-label="批量设置负例类型"><option value="">负例…</option><option value="other_character">其他角色</option><option value="non_character">非角色内容</option><option value="clear">清除负例</option></select><button class="maibot-button small" data-batch="batch_neg">应用负例</button><button class="maibot-button small" id="clear-selection">清空选择</button></div></div>
     <div id="image-grid" class="gallery"><div class="empty maibot-card">正在读取图片库…</div></div>
     <div class="pagination"><p class="muted" id="page-summary">—</p><div class="row"><button class="maibot-button" id="previous-page">上一页</button><button class="maibot-button" id="next-page">下一页</button><span class="page-jump"><label class="muted" for="page-jump">跳至</label><input class="maibot-input" id="page-jump" type="number" min="1" value="1" aria-label="页码"><button class="maibot-button small" id="jump-page">跳转</button></span></div></div>
   </section>
   <section class="section" id="training" role="region" aria-label="训练任务" hidden>
-    <div class="split"><aside class="card maibot-card"><div class="panel-title"><h3>新训练任务</h3><p class="hint">训练数据会在开始时冻结为快照。</p></div><div id="readiness" class="readiness maibot-inset">正在检查数据…</div><div class="field"><label>训练模式</label><div class="segmented" id="mode-buttons"><button aria-pressed="true" class="maibot-button" data-mode="incremental">增量训练</button><button class="maibot-button" data-mode="fresh">从头训练</button></div><p class="hint">增量继承当前模型；仅训练新增或标签已修改的图片。</p></div><div class="field"><label>训练设备</label><div class="segmented" id="device-buttons"><button aria-pressed="true" class="maibot-button" data-device="cpu">CPU</button><button class="maibot-button" data-device="cuda">CUDA</button></div><p id="training-reason" class="hint">正在检查运行环境…</p></div><div class="field"><label for="input-size">输入尺寸</label><select id="input-size" class="maibot-select"><option value="224">224×224</option><option value="320" selected>320×320</option><option value="448">448×448</option></select></div><button id="start-training" disabled class="maibot-button full maibot-button-primary" data-action="submit">开始训练</button><button id="rebuild-eval" class="maibot-button full" style="margin-top:10px">重建评估集</button><p class="hint">评估集是分类型报告的依据。重建后用当前已标注类型的图片重新挑选，历史报告不再可比。</p><p class="hint">每次运行一个任务，中断后可手动重试。</p></aside><div><div class="card maibot-card"><div class="card-head"><div><h3>任务记录</h3><p>运行期间每 5 秒更新状态</p></div><span class="badge maibot-badge" id="job-count">—</span></div><div id="job-list">正在读取任务…</div></div><div class="card report maibot-card"><div class="card-head"><div><h3>评测报告</h3></div><select class="maibot-select" id="report-select" aria-label="选择任务报告"><option value="">选择已完成任务</option></select><select class="maibot-select" id="report-compare-select" aria-label="选择对比任务"><option value="">不对比</option></select></div><div id="report-content" class="muted">尚未选择报告。</div></div></div></div>
+    <div class="split"><aside class="card maibot-card"><div class="panel-title"><h3>新训练任务</h3><p class="hint">训练数据会在开始时冻结为快照。</p></div><div id="readiness" class="readiness maibot-inset">正在检查数据…</div><div class="field"><label>训练模式</label><div class="segmented" id="mode-buttons"><button aria-pressed="true" class="maibot-button" data-mode="incremental">增量训练</button><button class="maibot-button" data-mode="fresh">从头训练</button></div><p class="hint">增量继承当前模型；仅训练新增或标签已修改的图片。</p></div><div class="field"><label>训练设备</label><div class="segmented" id="device-buttons"><button aria-pressed="true" class="maibot-button" data-device="cpu">CPU</button><button class="maibot-button" data-device="cuda">CUDA</button></div><p id="training-reason" class="hint">正在检查运行环境…</p></div><div class="field"><label for="input-size">输入尺寸</label><select id="input-size" class="maibot-select"><option value="224">224×224</option><option value="320" selected>320×320</option><option value="448">448×448</option></select></div><button id="start-training" disabled class="maibot-button full maibot-button-primary" data-action="submit">开始训练</button>
+      <div id="training-blockers"></div><button id="rebuild-eval" class="maibot-button full" style="margin-top:10px">重建评估集</button><p class="hint">评估集是分类型报告的依据。重建后用当前已标注类型的图片重新挑选，历史报告不再可比。</p><p class="hint">每次运行一个任务，中断后可手动重试。</p></aside><div><div class="card maibot-card"><div class="card-head"><div><h3>任务记录</h3><p>运行期间每 5 秒更新状态</p></div><span class="badge maibot-badge" id="job-count">—</span></div><div id="job-list">正在读取任务…</div></div><div class="card report maibot-card"><div class="card-head"><div><h3>评测报告</h3></div><select class="maibot-select" id="report-select" aria-label="选择任务报告"><option value="">选择已完成任务</option></select><select class="maibot-select" id="report-compare-select" aria-label="选择对比任务"><option value="">不对比</option></select></div><div id="report-content" class="muted">尚未选择报告。</div></div></div></div>
   </section>
   <section class="section" id="models" role="region" aria-label="模型版本" hidden>
     <div class="intro row between"><button class="maibot-button" id="rollback" disabled data-action="rollback">回退上一版本</button></div><p id="rollback-text" class="notice">正在读取版本信息…</p><p id="threshold-note" class="hint"></p><div id="version-list" class="versions"></div>
@@ -89,7 +90,7 @@ const selected = new Set();
 // build.py specializes this shared source for each sidebar entry.
 const HOME_PAGE = 'environment';
 const PAGE_TITLES = {images:'图片标注',training:'训练任务',models:'模型版本',test:'识别测试',environment:'运行环境'};
-let tab = HOME_PAGE, page = 1, filter = 'all', errorJob = '', reportJob = '', compareJob = '', mode = 'incremental', device = 'cpu', inputSize = null, deviceChosen = false;
+let tab = HOME_PAGE, page = 1, filter = 'all', styleFilter = '', textFilter = '', errorJob = '', reportJob = '', compareJob = '', mode = 'incremental', device = 'cpu', inputSize = null, deviceChosen = false;
 let busy = false, loading = false, loadAgain = false, generation = 0, lastUpdate = '', picturesLoading = false, noticeTimer = 0;
 let uploadKind = 'library', uploadLabel = 'self', uploadStyle = '', uploadNegType = '', uploadHasText = '', uploadRows = [], uploadRunning = false, uploadController = null, retryArgs = null;
 let character = '';
@@ -161,7 +162,12 @@ async function load(silent = false) {
     if (!data.versions || current === 'models') { const value = await query('versions', { character }); rows(value,'模型版本'); data.versions = value; }
     if (current === 'images' || current === 'training') data.form = await query('form', { character });
     if (current === 'images') {
-      const value = await query('pictures', { page, view: filter, character, ...(filter === 'errors' && errorJob ? { job_id:errorJob } : {}) });
+      const value = await query('pictures', {
+        page, view: filter, character,
+        ...(styleFilter ? { style: styleFilter } : {}),
+        ...(textFilter ? { has_text: textFilter } : {}),
+        ...(filter === 'errors' && errorJob ? { job_id:errorJob } : {}),
+      });
       rows(value,'图片库');
       if (version === generation) { data.pictures = value; page = value.pagination.page; picturesLoading = false; }
     } else if (current === 'training') {
@@ -196,6 +202,8 @@ function updateSelection() {
 }
 function renderImages() {
   $('image-filter').value = filter;
+  $('style-filter').value = styleFilter;
+  $('text-filter').value = textFilter;
   $('return-library').hidden = filter !== 'errors';
   if (!data.pictures) {
     $('image-grid').className = '';
@@ -207,7 +215,7 @@ function renderImages() {
   $('image-count').textContent = data.pictures.total;
   $('image-source').textContent = data.pictures.source_text;
   $('image-grid').className = (list.length ? 'gallery' : '') + (picturesLoading ? ' is-loading' : '');
-  $('image-grid').innerHTML = list.length ? list.map(row => `<article class="picture ${selected.has(row.id) ? 'selected' : ''} maibot-card"><div class="picture-media"><img src="${thumbnail(row.thumbnail)}" alt="${escape(row.label_text)}图片" loading="lazy" decoding="async"><label class="check"><input type="checkbox" data-select-image="${escape(row.id)}" aria-label="选择图片 ${escape(row.id)}" ${selected.has(row.id) ? 'checked' : ''}></label></div><div class="picture-body"><div class="row between">${badge(row.label_text, row.label === 'self' ? 'good' : '')}${row.style ? badge(row.style_text) : ''}<small>${row.width} × ${row.height}</small></div><p class="picture-meta">${escape(row.status)} · ${escape(row.training_text)}${row.neg_type_text ? ` · ${escape(row.neg_type_text)}` : ''}${row.has_text ? ` · ${escape(row.has_text_text)}` : ''}<br><span class="mono" title="图组 ${escape(row.group_id)}">${escape(row.id.slice(0,12))}</span></p>${row.model_text ? `<p class="hint" style="margin-bottom:9px">${escape(row.model_text)}</p>` : ''}<div class="picture-actions">${row.removed ? button('恢复',`data-image-action="restore" data-id="${escape(row.id)}"`,busy) : button('是'+character,`data-image-label="self" data-id="${escape(row.id)}"`,busy) + button('不是'+character,`data-image-label="other" data-id="${escape(row.id)}"`,busy) + button('删除',`data-image-action="remove" data-id="${escape(row.id)}"`,busy,'danger')}</div></div></article>`).join('') : empty(filter === 'errors' ? '暂无错判图片' : '这里还没有图片', filter === 'errors' && !errorJob ? '先从训练任务或模型版本中选择“查看错判”。' : '上传图片或换一个筛选范围。');
+  $('image-grid').innerHTML = list.length ? list.map(row => `<article class="picture ${selected.has(row.id) ? 'selected' : ''} maibot-card"><div class="picture-media"><img src="${thumbnail(row.thumbnail)}" alt="${escape(row.label_text)}图片" loading="lazy" decoding="async"><label class="check"><input type="checkbox" data-select-image="${escape(row.id)}" aria-label="选择图片 ${escape(row.id)}" ${selected.has(row.id) ? 'checked' : ''}></label></div><div class="picture-body"><div class="row between">${badge(row.label_text, row.label === 'self' ? 'good' : '')}${row.style ? badge(row.style_text) : ''}<small>${row.width} × ${row.height}</small></div><p class="picture-meta">${escape(row.status)} · ${escape(row.training_text)}${row.neg_type_text ? ` · ${escape(row.neg_type_text)}` : ''}${row.has_text ? ` · ${escape(row.has_text_text)}` : ''}${row.source_text ? ` · ${escape(row.source_text)}` : ''}<br><span class="mono" title="图组 ${escape(row.group_id)}">${escape(row.id.slice(0,12))}</span></p>${row.captured_text ? `<p class="hint">${escape(row.captured_text)}</p>` : ''}${row.model_text ? `<p class="hint" style="margin-bottom:9px">${escape(row.model_text)}</p>` : ''}<div class="picture-actions">${row.removed ? button('恢复',`data-image-action="restore" data-id="${escape(row.id)}"`,busy) : button('是'+character,`data-image-label="self" data-id="${escape(row.id)}"`,busy) + button('不是'+character,`data-image-label="other" data-id="${escape(row.id)}"`,busy) + button('删除',`data-image-action="remove" data-id="${escape(row.id)}"`,busy,'danger')}</div></div></article>`).join('') : empty(filter === 'errors' ? '暂无错判图片' : '这里还没有图片', filter === 'errors' && !errorJob ? '先从训练任务或模型版本中选择“查看错判”。' : '上传图片或换一个筛选范围。');
   $('page-summary').textContent = `第 ${page} / ${data.pictures.pages} 页 · 共 ${data.pictures.total} 张`;
   $('previous-page').disabled = picturesLoading || page <= 1;
   $('next-page').disabled = picturesLoading || page >= data.pictures.pages;
@@ -224,8 +232,8 @@ function renderTraining() {
     $('input-size').value = String(inputSize);
     const {self,other} = data.form.groups;
     const tier = {insufficient:'样本不足',thin:'样本偏少',usable:'可用',good:'样本充足'}[data.form.level] || '';
-    const hint = [data.form.advice, data.form.negative_thin ? '负例偏少：表情包和其他角色的图都要标一些——只用一类当负例时，模型对另一类几乎不设防（实测缺口 30–40 个百分点）。' : ''].filter(Boolean).map(text => `<p class="hint">${escape(text)}</p>`).join('');
-    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="100" value="${Math.min(Math.min(self,other),100)}" aria-label="训练数据准备程度"></progress>${tier ? `<p class="hint"><b>${tier}</b></p>` : ''}${hint}<p class="hint">待训练 ${data.form.pending_count ?? 0} 张 · 当前判定阈值 ${(data.form.threshold ?? 0.6).toFixed(2)}</p>${data.form.coverage_text ? `<p class="hint">内容类型：${escape(data.form.coverage_text)}${(data.form.coverage_missing || []).length ? ` · <b>缺 ${escape((data.form.coverage_missing || []).join("、"))}</b>` : ""}</p>` : ""}${data.form.eval_groups ? `<p class="hint">评估集：已建 ${data.form.eval_groups} 张（分类型报告用它）</p>` : (data.form.eval_plan && data.form.eval_plan.groups ? `<p class="hint">评估集：<b>未建立</b>，可建 ${data.form.eval_plan.groups} 张 —— 点下方「重建评估集」</p>` : "")}`;
+    const hint = [data.form.advice, data.form.negative_thin ? '负例偏少：「其他角色」和「非角色内容」都要标一些——只用一类当负例时，模型对另一类几乎不设防（实测缺口 30–40 个百分点）。' : ''].filter(Boolean).map(text => `<p class="hint">${escape(text)}</p>`).join('');
+    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="100" value="${Math.min(Math.min(self,other),100)}" aria-label="训练数据准备程度"></progress>${tier ? `<p class="hint"><b>${tier}</b></p>` : ''}${hint}<p class="hint">待训练 ${data.form.pending_count ?? 0} 张 · 当前判定阈值 ${(data.form.threshold ?? 0.6).toFixed(2)}</p>${data.form.capture_pending ? `<p class="hint">聊天捕获待确认：<b>${data.form.capture_pending}</b> 张（到「未标注」视图里确认或删除）</p>` : ''}${data.form.coverage_text ? `<p class="hint">内容类型：${escape(data.form.coverage_text)}${(data.form.coverage_missing || []).length ? ` · <b>缺 ${escape((data.form.coverage_missing || []).join("、"))}</b>` : ""}</p>` : ""}${data.form.eval_groups ? `<p class="hint">评估集：已建 ${data.form.eval_groups} 张（分类型报告用它）</p>` : (data.form.eval_plan && data.form.eval_plan.groups ? `<p class="hint">评估集：<b>未建立</b>，可建 ${data.form.eval_plan.groups} 张 —— 点下方「重建评估集」</p>` : "")}`;
   }
   const env = data.env, form = data.form;
   if (!deviceChosen && env?.installed && !env.detecting) {
@@ -242,6 +250,27 @@ function renderTraining() {
   const noNew = mode === 'incremental' && form?.has_model && form.pending_count === 0;
   const reason = noNew ? '没有待训练图片，可新增图片或选择从头训练。' : !form?.can_train ? '每类需要至少 20 个可训练独立图组。' : !env || env.detecting ? '正在检测运行环境，请稍候。' : !env.installed ? '请先到运行环境安装 PyTorch。' : device === 'cuda' && !env.cuda ? 'CUDA 不可用，请选择 CPU 或检查 GPU 环境。' : running ? '已有未结束的训练任务，可暂停、继续或取消。' : '数据与设备已准备好，可以开始训练。';
   $('training-reason').textContent = reason;
+  // One line per blocker, with the numbers: "差 8 组" is actionable, "条件不满足" is not.
+  const blockers = [];
+  if (!form) blockers.push('正在读取训练数据…');
+  if (form) {
+    if (!form.can_train) {
+      blockers.push(`每类需要 20 个可训练图组：是${character} ${form.groups.self}/20、不是${character} ${form.groups.other}/20`);
+    }
+    if (noNew) blockers.push('没有待训练图片：增量训练需要新增图片或改过标签，也可以改用从头训练');
+  }
+  if (!env) blockers.push('正在检测运行环境…');
+  else if (env.detecting) blockers.push('正在检测运行环境，请稍候');
+  else if (!env.installed) blockers.push('尚未安装 PyTorch，请到「运行环境」页安装');
+  else if (device === 'cuda' && !env.cuda) blockers.push('CUDA 不可用：请切到 CPU，或检查 GPU 环境');
+  if (running) blockers.push('已有训练任务在运行，等它结束或先取消');
+  if (busy) blockers.push('上一个操作还没完成');
+  const box = $('training-blockers');
+  if (box) {
+    box.innerHTML = blockers.length
+      ? blockers.map(text => `<p class="hint">· ${escape(text)}</p>`).join('')
+      : '<p class="hint">条件已满足，可以开始训练。</p>';
+  }
   $('start-training').disabled = busy || noNew || !form?.can_train || !env?.installed || env.detecting || (device === 'cuda' && !env.cuda) || running;
   const cudaButton = document.querySelector('[data-device=cuda]');
   cudaButton.hidden = cpuOnly;
@@ -356,7 +385,7 @@ function renderModels() {
 function renderTests() {
   if (!data.results) return;
   $('test-results').className = data.results.rows.length ? 'gallery' : '';
-  $('test-results').innerHTML = data.results.rows.length ? data.results.rows.map(row => `<article class="picture maibot-card"><div class="picture-media">${thumbnail(row.thumbnail) ? `<img src="${thumbnail(row.thumbnail)}" alt="识别测试图片" loading="lazy" decoding="async">` : '<span class="muted">无预览</span>'}</div><div class="picture-body">${badge(row.status === 'ok' ? row.judgment : '识别未完成',row.status === 'ok' && row.judgment === '命中' ? 'good' : row.status !== 'ok' ? 'error' : '')}<p class="hint">${escape(row.summary)}</p><p class="picture-meta"><span>${escape(row.version_text)}</span><span>${escape(row.elapsed)}</span></p><div class="picture-actions" style="margin-top:7px">${button('重新识别',`data-retest="${escape(row.id || '')}" title="${row.id ? '使用当前模型重新识别' : '原图已失效，请重新上传'}"`,busy || !row.id)}</div></div></article>`).join('') : empty('还没有识别测试','选择一张新图片，看看模型如何判断。');
+  $('test-results').innerHTML = data.results.rows.length ? data.results.rows.map(row => `<article class="picture maibot-card"><div class="picture-media">${thumbnail(row.thumbnail) ? `<img src="${thumbnail(row.thumbnail)}" alt="识别测试图片" loading="lazy" decoding="async">` : '<span class="muted">无预览</span>'}</div><div class="picture-body">${badge(row.status === 'ok' ? row.judgment : '识别未完成',row.status === 'ok' && row.judgment === '命中' ? 'good' : row.status !== 'ok' ? 'error' : '')}<p class="hint">${escape(row.summary)}</p><p class="picture-meta"><span>${escape(row.version_text)}</span><span>${escape(row.elapsed)}</span></p><div class="picture-actions" style="margin-top:7px">${button('重新识别',`data-retest="${escape(row.id || '')}" title="${row.id ? '使用当前模型重新识别' : '原图已失效，请重新上传'}"`,busy || !row.id)}${button('标为是并入库',`data-promote="${escape(row.id || '')}" data-promote-label="self" title="这张确实是${escape(character)}，收进训练库"`,busy || !row.id)}${button('标为不是并入库',`data-promote="${escape(row.id || '')}" data-promote-label="other" title="模型认错了，把它当负例收进训练库"`,busy || !row.id)}</div></div></article>`).join('') : empty('还没有识别测试','选择一张新图片，看看模型如何判断。');
 }
 function renderEnvironment() {
   if (!data.env) return;
@@ -422,6 +451,10 @@ document.addEventListener('click', event => {
   if (node.dataset.envKind) { const kind = data.env[`${node.dataset.envKind}_action`]; void operate(kind === 'remove' ? 'remove_dependencies' : 'install_dependencies',{ kind }); }
   if (node.dataset.envMode === 'host') void operate('environment_mode',{ mode:'host' });
   if (node.dataset.envMode === 'custom') { $('custom-python').value = data.env?.is_private ? data.env.python_path : ''; $('environment-dialog').showModal(); }
+  if (node.dataset.promote) {
+    void operate('promote',{result_id:node.dataset.promote,character,label:node.dataset.promoteLabel},'已加入训练库');
+    return;
+  }
   if (node.dataset.retest) void operate('test_upload',{upload_id:'',result_id:node.dataset.retest},'识别已更新');
   if (node.dataset.action === 'submit' && data.form) void operate('submit',{ request_key:data.form.request_key,character,mode,device,input_size:inputSize ?? 320 },'训练任务已提交');
   if (node.dataset.action === 'rollback') void operate('rollback', { character });
@@ -439,6 +472,8 @@ document.addEventListener('change', event => {
   if (node.dataset.selectImage) { if (node.checked) selectionAdd(node.dataset.selectImage); else selected.delete(node.dataset.selectImage); updateSelection(); }
 });
 $('image-filter').onchange = event => { filter = event.target.value; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
+$('style-filter').onchange = event => { styleFilter = event.target.value; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
+$('text-filter').onchange = event => { textFilter = event.target.value; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
 $('character-select').onchange = event => {
   character = event.target.value;
   // Selection, report and error-filter state all belong to the previous character:

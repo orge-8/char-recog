@@ -309,6 +309,33 @@ def _limit(result: dict, thresholds: dict) -> float:
     return float(thresholds.get(result.get("character"), DEFAULT_THRESHOLD))
 
 
+# Chat capture: only the band where the model hesitates. Outside it the answer is
+# either confident (nothing to learn) or rejected outright (score < 0.4), and a
+# noisy group chat would fill the queue with both. Turned on per install, off by
+# default: these are other people's pictures.
+CAPTURE_BAND = (0.4, 0.9)
+
+
+def capture_candidate(results: list, band: tuple = CAPTURE_BAND) -> dict | None:
+    """Highest-scoring result that lands inside the capture band, else None.
+
+    Takes raw results rather than ``select_top``'s top1: a score of 0.5 is below
+    the default gate, so it never becomes top1 exactly when it is most worth
+    capturing.
+    """
+    low, high = band
+    inside = [
+        result
+        for result in results or []
+        if result.get("status") == "ok"
+        and isinstance(result.get("score"), (int, float))
+        and low <= result["score"] < high
+    ]
+    if not inside:
+        return None
+    return max(inside, key=lambda result: result["score"])
+
+
 def select_top(results: list, thresholds: dict, margin: float = AMBIGUITY_MARGIN) -> dict:
     """Pick the single character worth printing, if any.
 

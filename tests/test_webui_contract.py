@@ -350,3 +350,29 @@ def test_medium_choices_no_longer_mix_an_overlay():
                     continue
                 assert "composite" not in declared, f"{page['id']}.{alias} 仍允许 composite"
                 assert len([c for c in declared if c]) == 3, f"{page['id']}.{alias} 画法档数不是 3"
+
+
+def test_picture_query_declares_the_tag_filters():
+    """Tagging without filtering was the gap: the fields existed, the list ignored them."""
+    data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
+    html = (ROOT / "webui" / "index.html").read_text(encoding="utf-8")
+    for page in data["pages"]:
+        query = (page.get("queries") or {}).get("pictures")
+        if not query:
+            continue
+        params = query["parameters"]
+        assert "untyped" in params["view"]["choices"], "../pictures 缺少「未标注类型」视图"
+        assert set(params["style"]["choices"]) == {"flat", "paint", "photo"}
+        assert set(params["has_text"]["choices"]) == {"yes", "no"}
+    assert "style-filter" in html and "text-filter" in html
+
+
+def test_recognition_results_can_be_promoted_into_the_library():
+    data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
+    html = (ROOT / "webui" / "index.html").read_text(encoding="utf-8")
+    page = next(item for item in data["pages"] if item["id"] == "test")
+    action = page["actions"].get("promote")
+    assert action is not None, "测试页没有声明 promote"
+    assert {"result_id", "character", "label"} <= set(action["parameters"])
+    assert "data-promote" in html
+

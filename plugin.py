@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 import base64
 import json
+import sqlite3
 import uuid
 import hashlib
 import time
@@ -18,6 +19,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .recog.service import Service, offload
 from .recog.scores import (
+    CAPTURE_BAND,
     DEFAULT_THRESHOLD,
     EVALUATION_THRESHOLD,
     JUDGMENT_BAND,
@@ -27,6 +29,7 @@ from .recog.scores import (
     by_neg,
     by_style,
     by_text,
+    capture_candidate,
     metrics,
     select_top,
     style_advice,
@@ -52,6 +55,11 @@ class Config(PluginConfigBase):
     worker_python: str = Field(default="", description="留空继承MaiBot Python并使用插件依赖覆盖层；可指定其他底层Python")
     input_size: Literal[224, 320, 448] = Field(default=320, description="新训练任务的图片尺寸；已训练模型使用自己的尺寸")
     auto_recognize: bool = Field(default=True, description="自动识别收到的图片，命中结果作为上下文提示")
+    chat_capture: bool = Field(
+        default=False,
+        description="把聊天里模型拿不准的图（得分 0.4–0.9）收进训练库，等人工确认；这些图默认不算真值。"
+        "开启前请确认群成员知情：这会把别人发的图片保存到本地",
+    )
 
 
 class CharacterRecognition(MaiBotPlugin):
@@ -132,6 +140,10 @@ class CharacterRecognition(MaiBotPlugin):
                             self._image_cache[key] = prediction
                     policy = select_top(prediction.get("results", []), limits)
                     top = policy["top1"]
+                    if self.config.chat_capture:
+                        # Never on the message path: ingest decodes and hashes the
+                        # image (~1s on a big one) while the hook budget is 6s.
+                        self._schedule_capture(raw, prediction.get("results", []))
                     if top and not policy["ambiguous"]:
                         result.append(
                             {
@@ -161,11 +173,50 @@ class CharacterRecognition(MaiBotPlugin):
         await offload(self.service.update_config, self.config.worker_python)
         await self.sync_characters()
 
+    def _schedule_capture(self, raw: bytes, results: list) -> None:
+        """Queue a chat image for the training library without blocking the chat."""
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.run_in_executor(None, self._capture, raw, results)
+
+    def _capture(self, raw: bytes, results: list) -> None:
+        """Runs in a worker thread. A capture failure must never reach the chat."""
+        from .recog.store import CAPTURE_LIMIT
+
+        try:
+            candidate = capture_candidate(results, CAPTURE_BAND)
+            if not candidate:
+                return
+            character = self.service.store.validate_character(candidate.get("character", ""))
+            if self.service.store.capture_pending(character) >= CAPTURE_LIMIT:
+                return
+            target = self.service.store.root / "uploads" / (uuid.uuid4().hex + ".img")
+            target.write_bytes(raw)
+            # label=None: this is the model's guess, not ground truth. Writing
+            # "self" here would train the next model on its own output.
+            self.service.store.ingest(
+                target, None, character, "", "", "", "chat", round(float(candidate["score"]), 6)
+            )
+        except (ValueError, OSError) as exc:
+            _LOG.debug("聊天图片未入库：%s", exc)
+        except Exception as exc:
+            # run_in_executor 的返回值无人消费：异常若从这里逃逸，连 asyncio
+            # 的 "never retrieved" 警告都不会有（库锁/IOERR 等将完全不可见）。
+            _LOG.warning("聊天图片入库异常（%s）：%s", type(exc).__name__, exc)
+
     async def _action(self, function, *args, **kwargs) -> dict:
         try:
             return await offload(function, *args, **kwargs)
         except (ValueError, OSError) as exc:
             return {"success": False, "error": str(exc)}
+        except sqlite3.Error as exc:
+            # 库锁/IOERR 不是前端能消化的裸异常：收敛为统一错误结构。
+            _LOG.warning("WebUI 动作数据库错误：%s", exc)
+            return {"success": False, "error": f"数据库错误：{exc}"}
 
     def _validate_character(self, character: str) -> str:
         return self.service.store.validate_character(character)
@@ -206,18 +257,53 @@ class CharacterRecognition(MaiBotPlugin):
         return {"rows": rows, "active": sorted(await offload(self.active_versions))}
 
     @API("self_images", version="1")
-    async def images(self, page: int = 1, view: str = "all", character: str = "", job_id: str = "") -> dict:
+    async def images(
+        self,
+        page: int = 1,
+        view: str = "all",
+        character: str = "",
+        job_id: str = "",
+        style: str = "",
+        has_text: str = "",
+    ) -> dict:
         errors = job_id if view == "errors" else ""
         try:
             character = self._validate_character(character)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        result = await offload(self.service.store.images, page, view, job_id, character)
+        result = await offload(
+            self.service.store.images, page, view, job_id, character, style, has_text
+        )
         result.update(
             errors_active=bool(errors),
             character=character,
             source_text=f"错判图片 · 任务 {errors[:8]}（人工标签与模型判断不一致）" if errors else f"图片库 · {character}",
         )
+        return result
+
+    @API("self_result_promote", version="1")
+    async def result_promote(self, result_id: str, character: str, label: str = "self") -> dict:
+        """Turn a recognition-test image into a training example.
+
+        Without this, "the model got this one wrong" and "the library learns from
+        it" are two separate systems: the test page throws the image away.
+        """
+        if label not in {"self", "other"}:
+            return {"success": False, "error": "入库标签必须为该角色或不是该角色"}
+        try:
+            character = self._validate_character(character)
+            raw = await offload(self.read_test_image, result_id)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            return {"success": False, "error": str(exc)}
+        target = self.service.store.root / "uploads" / (uuid.uuid4().hex + ".img")
+        target.write_bytes(raw)
+        result = await self._action(
+            self.service.store.ingest, target, label, character, "", "", ""
+        )
+        if isinstance(result, dict) and result.get("success") is False:
+            target.unlink(missing_ok=True)
+            return result
+        result["message"] = "已加入训练库" if not result.get("already_exists") else "这张图已在训练库里"
         return result
 
     @API("self_label", version="1")
@@ -501,7 +587,7 @@ class CharacterRecognition(MaiBotPlugin):
         style_rows = by_style(eval_predictions, current) if eval_predictions else []
         try:
             coverage = await offload(self.service.store.style_coverage, character)
-        except (ValueError, OSError):
+        except (ValueError, OSError, sqlite3.Error):
             coverage = []
         labelled = sum(row["train"] + row["eval"] + row["other"] for row in coverage if row["style"])
         plan = None
@@ -513,7 +599,7 @@ class CharacterRecognition(MaiBotPlugin):
             # to re-do work they already did.
             try:
                 plan = await offload(planner, character)
-            except (ValueError, OSError):
+            except (ValueError, OSError, sqlite3.Error):
                 plan = None
         styles = {
             "rows": style_rows,

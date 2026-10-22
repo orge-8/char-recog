@@ -7,6 +7,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+# QA 修复（gstack-qa-lead, 2026-10-22）：README 声称 maibot_sdk 缺失时本模块整模块跳过，
+# 但原先直接 exec plugin.py 会在收集阶段抛 ModuleNotFoundError，导致整个 pytest 运行
+# 以 "Interrupted: N errors during collection" 中断。改为显式 importorskip，与文档一致。
+pytest.importorskip("maibot_sdk", reason="plugin.py 依赖宿主 SDK maibot_sdk，缺失时整模块跳过")
+
 spec = importlib.util.spec_from_file_location(
     "self_plugin_test",
     Path(__file__).parents[1] / "plugin.py",
@@ -46,7 +51,9 @@ def test_report_navigation_does_not_write_shared_settings():
         style_coverage=lambda character: [],
         validate_character=Store.validate_character,
         job=lambda job_id: {"state": "complete", "character": "洛天依"},
-        images=lambda page, view, job_id, character: calls.append((page, view, job_id, character)) or {},
+        images=lambda page, view, job_id, character, style="", has_text="": calls.append(
+            (page, view, job_id, character, style, has_text)
+        ) or {},
     ))
     assert asyncio.run(plugin.select_report("first")) == {
         "navigate_page": "training", "navigate_params": {"job_id": "first"}
@@ -56,7 +63,10 @@ def test_report_navigation_does_not_write_shared_settings():
     }
     assert asyncio.run(plugin.images(1, "errors", "洛天依", "second"))["errors_active"]
     assert not asyncio.run(plugin.images(1, "all", "洛天依"))["errors_active"]
-    assert calls == [(1, "errors", "second", "洛天依"), (1, "all", "", "洛天依")]
+    assert calls == [
+        (1, "errors", "second", "洛天依", "", ""),
+        (1, "all", "", "洛天依", "", ""),
+    ]
     assert asyncio.run(plugin.clear_errors()) == {"navigate_page": "images", "navigate_params": {"view": "all"}}
 
 
