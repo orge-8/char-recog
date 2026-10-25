@@ -1,4 +1,10 @@
-"""Fixed evaluation set: whole batches, stable membership, legacy compatibility."""
+"""Fixed evaluation set: whole batches, stable membership, per-label budget.
+
+0.6.0 removed the medium / text / negative-identity axes, so the eval budget is
+per label instead of per bucket. The invariant that still matters is unchanged:
+a (width, height) batch is a proxy for one source, and a batch never straddles
+eval and the training side.
+"""
 
 import time
 
@@ -6,22 +12,22 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from recog.store import Store
+from recog.store import EVAL_PER_LABEL, Store
 
 CHAR = "洛天依"
 
 
-def add(store, seed, label, style="", size=(120, 96), neg_type=""):
+def add(store, seed, label, size=(120, 96)):
     """Upload one noise image. Size is explicit because batch identity is (w, h)."""
     width, height = size
     pixels = np.random.default_rng(seed).integers(0, 256, (height, width, 3), dtype=np.uint8)
     path = store.root / "uploads" / f"{seed}-{time.time_ns()}.png"
     Image.fromarray(pixels).save(path)
-    return store.ingest(path, label, CHAR, style, neg_type)
+    return store.ingest(path, label, CHAR)
 
 
 def batch_key(row):
-    return (row["label"], row["style"] if row["label"] == "self" else row["neg_type"], row["width"], row["height"])
+    return (row["label"], row["width"], row["height"])
 
 
 def rows(store):
@@ -42,19 +48,15 @@ def freeze(store, job="job"):
 
 
 def seed_corpus(store):
-    """Batches small enough to fit the per-style budget, so isolation is exact."""
+    """Three batches per label, ten images each: one whole batch fits the budget."""
     seed = 1000
     for size in ((100, 100), (110, 110), (120, 120)):
-        for _ in range(12):
-            add(store, seed, "self", "flat", size)
-            seed += 1
-    for size in ((300, 400), (310, 410), (320, 420)):
         for _ in range(10):
-            add(store, seed, "self", "paint", size)
+            add(store, seed, "self", size)
             seed += 1
     for size in ((140, 90), (150, 100), (160, 110)):
-        for _ in range(12):
-            add(store, seed, "other", "photo", size, neg_type="non_character")
+        for _ in range(10):
+            add(store, seed, "other", size)
             seed += 1
 
 
@@ -71,46 +73,47 @@ def test_whole_batch_never_crosses_train_and_eval(tmp_path):
     assert "eval" in {row["split"] for row in rows(store)}
 
 
-def test_eval_takes_at_most_the_per_style_budget(tmp_path):
+def test_eval_takes_at_most_the_per_label_budget(tmp_path):
     store = Store(tmp_path)
     seed_corpus(store)
     freeze(store)
-    coverage = {row["style"]: row for row in store.style_coverage(CHAR)}
-    assert coverage["flat"]["eval"] == 24  # 12 + 12, the third batch would exceed 25
-    assert coverage["paint"]["eval"] == 20  # 10 + 10
-    # Leftovers are then randomly split into train/val/test, so 12 - 4 = 8 train.
-    assert coverage["flat"]["train"] + coverage["flat"]["other"] == 12
-    assert coverage["paint"]["train"] + coverage["paint"]["other"] == 10
+    splits = [(row["label"], row["split"]) for row in rows(store)]
+    # 30 per label, 20 reserved for training => 10 in eval, one whole batch.
+    assert splits.count(("self", "eval")) == 10
+    assert splits.count(("other", "eval")) == 10
+    assert store.eval_groups(CHAR) == 20
+    assert splits.count(("self", "train")) + splits.count(("self", "val")) + splits.count(("self", "test")) == 20
 
 
-def test_bucket_smaller_than_target_goes_entirely_to_eval(tmp_path):
+def test_budget_never_eats_the_training_reserve(tmp_path):
+    """Exactly 20 groups per label: the reserve wins, so no eval set is built."""
     store = Store(tmp_path)
     for index in range(20):
-        add(store, 1000 + index, "self", "flat", (100, 100))
+        add(store, 1000 + index, "self", (100, 100))
     for index in range(20):
-        add(store, 2000 + index, "other", "photo", (120, 90), neg_type="non_character")
-    for index in range(3):
-        add(store, 3000 + index, "self", "paint", (300, 400))
-    freeze(store)
-    coverage = {row["style"]: row for row in store.style_coverage(CHAR)}
-    assert coverage["paint"]["eval"] == 3
-    assert coverage["paint"]["train"] == 0
+        add(store, 2000 + index, "other", (120, 90))
+    snapshot = freeze(store)
+    assert store.eval_groups(CHAR) == 0
+    assert snapshot["eval_build"]["built"] is False
+    assert {row["split"] for row in snapshot["images"]} <= {"train", "val", "test"}
 
 
 def test_single_dominant_batch_is_sampled_and_reported(tmp_path):
     """One batch bigger than the budget cannot be isolated; say so instead of lying."""
     store = Store(tmp_path)
     for index in range(60):
-        add(store, 1000 + index, "self", "flat", (100, 100))
+        add(store, 1000 + index, "self", (100, 100))
     for index in range(40):
-        add(store, 2000 + index, "other", "photo", (120, 90), neg_type="non_character")
+        add(store, 2000 + index, "other", (120, 90))
     snapshot = freeze(store)
     unisolated = snapshot["eval_build"]["unisolated"]
     assert {entry["label"] for entry in unisolated} == {"self", "other"}
-    coverage = {row["style"]: row for row in store.style_coverage(CHAR)}
-    assert coverage["flat"]["eval"] == 25
-    # The other 35 went to train/val/test, so only 25 of them stay in "train".
-    assert coverage["flat"]["train"] + coverage["flat"]["other"] == 35
+    assert all(entry["size"] == 60 or entry["size"] == 40 for entry in unisolated)
+    splits = [(row["label"], row["split"]) for row in rows(store)]
+    # self: 60 - 20 reserve = 40 available, capped by EVAL_PER_LABEL = 25.
+    assert splits.count(("self", "eval")) == EVAL_PER_LABEL
+    # other: 40 - 20 reserve = 20 available, below the cap.
+    assert splits.count(("other", "eval")) == 20
 
 
 def test_eval_membership_is_stable_across_runs(tmp_path):
@@ -123,54 +126,70 @@ def test_eval_membership_is_stable_across_runs(tmp_path):
     assert first and first == second
 
 
-def test_untagged_library_gets_no_eval_set(tmp_path):
-    """A 0.5.x library has no style tags, so nothing is moved into eval."""
+def test_eval_set_builds_without_any_annotation(tmp_path):
+    """0.6.0: nothing has to be tagged any more, so the eval set always builds."""
     store = Store(tmp_path)
-    for index in range(20):
-        add(store, 1000 + index, "self")
-    for index in range(20):
-        add(store, 2000 + index, "other")
+    seed_corpus(store)
     snapshot = freeze(store)
-    assert {row["split"] for row in snapshot["images"]} <= {"train", "val", "test"}
-    assert snapshot["eval_build"]["built"] is False
+    assert snapshot["eval_build"]["built"] is True
+    assert store.eval_groups(CHAR) == 20
 
 
-def test_legacy_rows_keep_empty_style_after_migration(tmp_path):
+def test_removed_annotation_columns_are_gone(tmp_path):
     store = Store(tmp_path)
-    add(store, 1, "self", "flat")
+    add(store, 1, "self")
     with store.db() as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(images)")}
-        assert {"style", "neg_type"} <= columns
-        # Simulate a pre-0.5.12 row by clearing both new columns.
-        db.execute("UPDATE images SET style='',neg_type=''")
-    listed = store.images(character=CHAR)["rows"]
-    assert listed[0]["style"] == ""
-    assert listed[0]["style_text"] == "未标注类型"
+    assert "style" not in columns and "neg_type" not in columns and "has_text" not in columns
 
 
-def test_style_and_neg_type_validation(tmp_path):
-    store = Store(tmp_path)
-    result = add(store, 1, "self", "flat")
-    with pytest.raises(ValueError):
-        store.set_style(result["id"], "official")
-    with pytest.raises(ValueError):
-        store.set_style(result["id"], "flat", "non_character")  # positives cannot carry a neg bucket
-    negative = add(store, 2, "other", "photo", neg_type="non_character")
-    store.set_style(negative["id"], "photo", "other_character")
-    listed = {row["id"]: row for row in store.images(character=CHAR)["rows"]}
-    assert listed[negative["id"]]["neg_type"] == "other_character"
+OLD_SCHEMA = """
+CREATE TABLE images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL,
+  width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0,
+  reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '',
+  style TEXT NOT NULL DEFAULT '', neg_type TEXT NOT NULL DEFAULT '', has_text TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '', model_score REAL);
+CREATE TABLE groups(id TEXT PRIMARY KEY, split TEXT);
+CREATE TABLE jobs(id TEXT PRIMARY KEY, request_key TEXT UNIQUE, state TEXT, pid INTEGER, error TEXT,
+  created REAL, snapshot_sha TEXT, character TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '',
+  input_size INTEGER);
+CREATE TABLE models(id TEXT PRIMARY KEY, job_id TEXT, sha TEXT, metrics TEXT, created REAL, character TEXT NOT NULL DEFAULT '');
+CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
+"""
 
 
-def test_batch_style_rejects_mixed_labels_for_negative_bucket(tmp_path):
-    store = Store(tmp_path)
-    positive = add(store, 1, "self", "flat")
-    negative = add(store, 2, "other", "photo", neg_type="non_character")
-    with pytest.raises(ValueError):
-        store.batch_style(f"{positive['id']},{negative['id']}", "flat", "other_character")
-    store.batch_style(f"{positive['id']},{negative['id']}", "paint")
-    listed = {row["id"]: row for row in store.images(character=CHAR)["rows"]}
-    assert listed[positive["id"]]["style"] == "paint"
-    assert listed[negative["id"]]["style"] == "paint"
+def test_upgrade_drops_the_columns_and_keeps_every_row(tmp_path):
+    """0.5.x → 0.6.0 is a destructive migration on real libraries; prove the data survives."""
+    import sqlite3
+
+    root = tmp_path / "old"
+    root.mkdir()
+    with sqlite3.connect(root / "catalog.sqlite3") as db:
+        db.executescript(OLD_SCHEMA)
+        db.execute(
+            "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,"
+            "created,character,style,neg_type,has_text,source,model_score) VALUES "
+            "('a','images/a.png','s','d',1.0,1.25,100,80,'g','self',0,'',1.0,?, 'flat','','yes','webui',0.5)",
+            (CHAR,),
+        )
+        db.execute("INSERT INTO groups VALUES ('g','train')")
+        db.execute("INSERT INTO settings VALUES ('keep','me')")
+
+    # Opening the plugin's store runs the migration.
+    store = Store(root)
+    with store.db() as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(images)")}
+        saved = dict(db.execute("SELECT * FROM images").fetchone())
+        setting = db.execute("SELECT value FROM settings WHERE key='keep'").fetchone()[0]
+    assert "style" not in columns and "neg_type" not in columns and "has_text" not in columns
+    assert saved["label"] == "self" and saved["character"] == CHAR
+    assert saved["source"] == "webui" and saved["model_score"] == 0.5
+    assert setting == "me"
+    # Idempotent: the second open must not try to rebuild again.
+    again = Store(root)
+    with again.db() as db:
+        assert "style" not in {row[1] for row in db.execute("PRAGMA table_info(images)")}
+        assert db.execute("SELECT COUNT(*) FROM images").fetchone()[0] == 1
 
 
 def test_rebuild_eval_is_idempotent_and_matches_the_plan(tmp_path):
@@ -184,15 +203,21 @@ def test_rebuild_eval_is_idempotent_and_matches_the_plan(tmp_path):
     # training images at all. That is the property the dialog relies on.
     assert plan["from_train"] == 0
     assert plan["from_other"] == plan["groups"]
-    # Production calls both with defaults; a custom budget would describe a
-    # different set than the one the dialog promised.
     store.rebuild_eval(CHAR)
     first = {row["id"] for row in rows(store) if row["split"] == "eval"}
     store.rebuild_eval(CHAR)
     second = {row["id"] for row in rows(store) if row["split"] == "eval"}
     assert first and first == second
-    # Same seed and same data => the plan already described this set.
     assert plan["groups"] == len(first)
+
+
+def test_rebuild_rejects_an_absurd_budget(tmp_path):
+    store = Store(tmp_path)
+    seed_corpus(store)
+    with pytest.raises(ValueError):
+        store.rebuild_eval(CHAR, per_label=4)
+    with pytest.raises(ValueError):
+        store.rebuild_eval(CHAR, per_label=201)
 
 
 def test_eval_plan_does_not_touch_splits(tmp_path):
@@ -206,7 +231,7 @@ def test_eval_plan_does_not_touch_splits(tmp_path):
 
 
 def test_legacy_library_without_eval_offers_a_plan(tmp_path):
-    """A 0.5.x library has every group assigned, so no eval set; the plan must say
+    """A library whose groups are all assigned gets no eval set; the plan must say
     what rebuilding would cost instead of asking the user to tag more images."""
     store = Store(tmp_path)
     seed_corpus(store)
@@ -218,15 +243,13 @@ def test_legacy_library_without_eval_offers_a_plan(tmp_path):
     plan = readiness["eval_plan"]
     assert plan["groups"] > 0
     assert plan["from_train"] > 0
-    assert sum(plan["by_style"].values()) + sum(plan["by_neg"].values()) == plan["groups"]
 
 
-def test_readiness_reports_coverage(tmp_path):
+def test_readiness_reports_the_eval_group_count(tmp_path):
     store = Store(tmp_path)
     seed_corpus(store)
     readiness = store.training_readiness(CHAR)
-    assert {row["style"] for row in readiness["coverage"]} == {"flat", "paint", "photo", ""}
-    # 实拍 only exists as negatives here, so it is missing as a positive medium.
-    # 图文/梗图 is no longer a medium (it became the has_text marker in 0.5.18).
-    assert readiness["coverage_missing"] == ["实拍"]
-    assert "平涂/Q版" in readiness["coverage_text"]
+    assert readiness["eval_groups"] == 0
+    assert "coverage" not in readiness and "coverage_text" not in readiness
+    freeze(store)
+    assert store.training_readiness(CHAR)["eval_groups"] == 20

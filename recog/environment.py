@@ -14,6 +14,16 @@ from .store import atomic_json
 from .processes import process_alive
 from .dependency_download import prepare_wheels
 
+# 非 torch 系依赖钉死精确版本。torch/torchvision 走上面的 prepare_wheels +
+# download.pytorch.org 索引 + SHA256 核验，不在这里重复声明。
+# 抬版本时同步改 `_manifest.json` / `pyproject.toml` / `requirements-worker.txt`
+# 三处的区间，别让声明与安装再次漂移（0.6.0 就漂过一次：声明 <13，实装 13.0.0）。
+PINNED_PACKAGES = [
+    "Pillow==13.0.0",
+    "numpy==2.5.4",
+    "psutil==7.2.2",
+]
+
 def status(service):
     try:
         service.check_environment_idle()
@@ -347,8 +357,11 @@ def _install(root: Path, python: str, kind: str, overlay: Path | None = None) ->
             # Parent-project indexes otherwise outrank --index-url and may select CPU wheels for GPU installs.
             run_installer([uv, "pip", "install", "--no-config", "--python", python, *destination,
                            *map(str, wheels), "--index-url", index, *reinstall], update)
+            # 0.6.1：这里原本是无版本上界的 `Pillow>=11,<13`，从默认索引装，
+            # 与上面走 prepare_wheels + SHA256 核验的那一套标准不一致。改成钉死
+            # 精确版本（含 hash），安装结果可复现，也不会某天悄悄升到大版本。
             run_installer([uv, "pip", "install", "--no-config", "--python", python, *destination,
-                           "Pillow>=11,<13", "numpy>=2,<3", "psutil>=6,<8"], update)
+                           *PINNED_PACKAGES, *reinstall], update)
             update(phase="verify", percent=None)
             command = [python, "-X", "utf8"]
             if stage is not None:

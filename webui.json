@@ -32,7 +32,6 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
-                "untyped",
                 "errors",
                 "removed"
               ]
@@ -45,23 +44,6 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo"
-              ]
-            },
-            "has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no"
-              ]
             }
           }
         },
@@ -109,6 +91,11 @@
         "characters": {
           "api": "self_characters",
           "parameters": {}
+        },
+        "ui": {
+          "api": "self_ui",
+          "version": "1",
+          "parameters": {}
         }
       },
       "actions": {
@@ -132,34 +119,6 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "upload_style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo",
-                ""
-              ]
-            },
-            "upload_neg_type": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "other_character",
-                "non_character",
-                ""
-              ]
-            },
-            "upload_has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no",
-                ""
-              ]
             }
           }
         },
@@ -184,45 +143,6 @@
             }
           },
           "confirmation": "确认批量标为不是该角色所有已选图片（包括其他页）？"
-        },
-        "images_batch_style": {
-          "api": "self_images_batch_style",
-          "parameters": {
-            "image_ids": {
-              "type": "string",
-              "required": true,
-              "max_length": 65536
-            },
-            "style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo",
-                ""
-              ]
-            },
-            "neg_type": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "other_character",
-                "non_character",
-                ""
-              ]
-            },
-            "has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no",
-                ""
-              ]
-            }
-          },
-          "confirmation": "确认批量设置所选图片的内容类型？"
         },
         "batch_remove": {
           "api": "self_images_batch_remove",
@@ -295,6 +215,17 @@
               "max_length": 32
             }
           }
+        },
+        "ui_save": {
+          "api": "self_ui_save",
+          "version": "1",
+          "parameters": {
+            "state": {
+              "type": "string",
+              "required": true,
+              "max_length": 1024
+            }
+          }
         }
       },
       "uploads": {
@@ -305,6 +236,148 @@
         "recognition": {
           "action": "test_upload",
           "image_max_edge": 4000
+        }
+      }
+    },
+    {
+      "id": "capture",
+      "title": "待确认",
+      "placement": "workspace",
+      "icon": "list",
+      "description": "逐组确认聊天里模型拿不准的图片，默认汇总全部角色；确认后才写入训练真值。",
+      "mode": "custom",
+      "entry": "webui/capture.html",
+      "queries": {
+        "pictures": {
+          "api": "self_images",
+          "version": "1",
+          "parameters": {
+            "page": {
+              "type": "integer",
+              "required": false,
+              "minimum": 1
+            },
+            "view": {
+              "type": "string",
+              "required": false,
+              "choices": [
+                "all",
+                "eligible",
+                "excluded",
+                "unlabelled",
+                "errors",
+                "removed",
+                "captured"
+              ]
+            },
+            "job_id": {
+              "type": "string",
+              "required": false
+            },
+            "character": {
+              "type": "string",
+              "required": false,
+              "max_length": 32
+            }
+          }
+        },
+        "versions": {
+          "api": "self_models",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          }
+        },
+        "env": {
+          "api": "self_environment",
+          "parameters": {}
+        },
+        "characters": {
+          "api": "self_characters",
+          "parameters": {}
+        },
+        "ui": {
+          "api": "self_ui",
+          "version": "1",
+          "parameters": {}
+        }
+      },
+      "actions": {
+        "capture_confirm": {
+          "api": "self_capture_confirm",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "label": {
+              "type": "string",
+              "required": true,
+              "choices": [
+                "self",
+                "other"
+              ]
+            }
+          }
+        },
+        "capture_undo": {
+          "api": "self_capture_undo",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          }
+        },
+        "capture_purge": {
+          "api": "self_capture_purge",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "彻底删除这张聊天捕获？图片文件也会被删除，无法恢复。若只是想标记，请用 1–4 确认。"
+        },
+        "capture_cleanup": {
+          "api": "self_capture_cleanup",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": false,
+              "max_length": 32
+            }
+          },
+          "confirmation": "清理当前可见范围内已被自动排除的旧聊天捕获？会删除记录和图片文件，不影响人工标注的图片。"
+        },
+        "ui_save": {
+          "api": "self_ui_save",
+          "version": "1",
+          "parameters": {
+            "state": {
+              "type": "string",
+              "required": true,
+              "max_length": 1024
+            }
+          }
         }
       }
     },
@@ -334,7 +407,6 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
-                "untyped",
                 "errors",
                 "removed"
               ]
@@ -347,23 +419,6 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo"
-              ]
-            },
-            "has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no"
-              ]
             }
           }
         },
@@ -410,6 +465,11 @@
         },
         "characters": {
           "api": "self_characters",
+          "parameters": {}
+        },
+        "ui": {
+          "api": "self_ui",
+          "version": "1",
           "parameters": {}
         }
       },
@@ -474,6 +534,17 @@
             }
           },
           "confirmation": "确认取消此任务？"
+        },
+        "delete_jobs": {
+          "api": "self_training_delete",
+          "version": "1",
+          "parameters": {
+            "jobs": {
+              "type": "string",
+              "required": true,
+              "max_length": 2048
+            }
+          }
         },
         "eval_rebuild": {
           "api": "self_eval_rebuild",
@@ -548,34 +619,17 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "upload_style": {
+            }
+          }
+        },
+        "ui_save": {
+          "api": "self_ui_save",
+          "version": "1",
+          "parameters": {
+            "state": {
               "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo",
-                ""
-              ]
-            },
-            "upload_neg_type": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "other_character",
-                "non_character",
-                ""
-              ]
-            },
-            "upload_has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no",
-                ""
-              ]
+              "required": true,
+              "max_length": 1024
             }
           }
         }
@@ -617,7 +671,6 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
-                "untyped",
                 "errors",
                 "removed"
               ]
@@ -630,23 +683,6 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo"
-              ]
-            },
-            "has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no"
-              ]
             }
           }
         },
@@ -694,6 +730,11 @@
         "characters": {
           "api": "self_characters",
           "parameters": {}
+        },
+        "ui": {
+          "api": "self_ui",
+          "version": "1",
+          "parameters": {}
         }
       },
       "actions": {
@@ -717,6 +758,17 @@
             }
           },
           "confirmation": "确认回退到显示的目标版本？"
+        },
+        "delete_versions": {
+          "api": "self_models_delete",
+          "version": "1",
+          "parameters": {
+            "versions": {
+              "type": "string",
+              "required": true,
+              "max_length": 2048
+            }
+          }
         },
         "apply_threshold": {
           "api": "self_threshold_apply",
@@ -780,34 +832,17 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "upload_style": {
+            }
+          }
+        },
+        "ui_save": {
+          "api": "self_ui_save",
+          "version": "1",
+          "parameters": {
+            "state": {
               "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo",
-                ""
-              ]
-            },
-            "upload_neg_type": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "other_character",
-                "non_character",
-                ""
-              ]
-            },
-            "upload_has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no",
-                ""
-              ]
+              "required": true,
+              "max_length": 1024
             }
           }
         }
@@ -849,7 +884,6 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
-                "untyped",
                 "errors",
                 "removed"
               ]
@@ -862,23 +896,6 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo"
-              ]
-            },
-            "has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no"
-              ]
             }
           }
         },
@@ -925,6 +942,11 @@
         },
         "characters": {
           "api": "self_characters",
+          "parameters": {}
+        },
+        "ui": {
+          "api": "self_ui",
+          "version": "1",
           "parameters": {}
         }
       },
@@ -964,34 +986,6 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "upload_style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo",
-                ""
-              ]
-            },
-            "upload_neg_type": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "other_character",
-                "non_character",
-                ""
-              ]
-            },
-            "upload_has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no",
-                ""
-              ]
             }
           }
         },
@@ -1018,6 +1012,17 @@
             }
           },
           "confirmation": "把这张测试图加入训练库并标注？"
+        },
+        "ui_save": {
+          "api": "self_ui_save",
+          "version": "1",
+          "parameters": {
+            "state": {
+              "type": "string",
+              "required": true,
+              "max_length": 1024
+            }
+          }
         }
       },
       "uploads": {
@@ -1057,7 +1062,6 @@
                 "eligible",
                 "excluded",
                 "unlabelled",
-                "untyped",
                 "errors",
                 "removed"
               ]
@@ -1070,23 +1074,6 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "style": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo"
-              ]
-            },
-            "has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no"
-              ]
             }
           }
         },
@@ -1133,6 +1120,11 @@
         },
         "characters": {
           "api": "self_characters",
+          "parameters": {}
+        },
+        "ui": {
+          "api": "self_ui",
+          "version": "1",
           "parameters": {}
         }
       },
@@ -1222,34 +1214,17 @@
               "type": "string",
               "required": true,
               "max_length": 32
-            },
-            "upload_style": {
+            }
+          }
+        },
+        "ui_save": {
+          "api": "self_ui_save",
+          "version": "1",
+          "parameters": {
+            "state": {
               "type": "string",
-              "required": false,
-              "choices": [
-                "flat",
-                "paint",
-                "photo",
-                ""
-              ]
-            },
-            "upload_neg_type": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "other_character",
-                "non_character",
-                ""
-              ]
-            },
-            "upload_has_text": {
-              "type": "string",
-              "required": false,
-              "choices": [
-                "yes",
-                "no",
-                ""
-              ]
+              "required": true,
+              "max_length": 1024
             }
           }
         }

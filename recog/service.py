@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -27,6 +28,11 @@ WARMUP_PING_TIMEOUT = 45.0
 WARMUP_LOAD_TIMEOUT = 20.0
 WARMUP_DEADLINE = 120.0
 WIRE_LOCK_WAIT = 0.3
+
+# Manual cleanup only ever removes finished work. A paused job still owns a
+# resumable checkpoint, so the page warns about that before asking.
+DELETABLE_STATES = {"complete", "failed", "cancelled", "interrupted", "paused"}
+DELETE_LIMIT = 50
 
 
 def inference_error_message(detail: str) -> str:
@@ -61,9 +67,11 @@ class Service:
         # Thread negotiation: 0 keeps the worker default, 1 is the training mode.
         self.desired_threads = 0
         self.threads_applied = 0
-        self.training_active = False
         self.auto_warm = False
         self.train_lock = threading.Lock()
+        # Activation and deletion must not interleave: a version loaded by the
+        # worker may not be removed from disk before it becomes the active one.
+        self.version_lock = threading.Lock()
         self.infer_lock = threading.Lock()
         # Spawn/warm-up are serialized here; interactive requests never take it.
         self._start_lock = threading.Lock()
@@ -217,8 +225,12 @@ class Service:
                             (state, f"训练进程退出，code={process.returncode}", job),
                         )
                     self.processes.pop(job)
-            self.training_active = any(process.poll() is None for process in self.processes.values())
-        if not self.training_active and self.desired_threads:
+            # 训练是否在跑，直接看 processes 即可；`training_active` 曾是第二份
+            # 真相，由两把不同的锁分别写（这里是 train_lock，mark_training 是
+            # _state），全文只有下面那一次「读自己刚写的值」，没有别的消费者。
+            # 0.6.1 删掉它，`desired_threads` 已承载全部语义。
+            training_running = any(process.poll() is None for process in self.processes.values())
+        if not training_running and self.desired_threads:
             self.mark_training(False)
 
     def cancel(self, job: str) -> dict:
@@ -272,6 +284,129 @@ class Service:
                     db.execute("UPDATE jobs SET state='paused',error=? WHERE id=?", (str(exc), job))
                 raise
         return self.store.job(job)
+
+    def delete_jobs(self, job_ids) -> dict:
+        ids = self._clean_ids(job_ids, "任务")
+        with self.train_lock:
+            with self.store.db() as db:
+                placeholders = ",".join("?" for _ in ids)
+                rows = {
+                    row["id"]: row["state"]
+                    for row in db.execute(f"SELECT id,state FROM jobs WHERE id IN ({placeholders})", ids)
+                }
+            if len(rows) != len(ids):
+                raise ValueError("选择中有不存在的任务，请刷新后重试")
+            if any(state not in DELETABLE_STATES for state in rows.values()):
+                raise ValueError("运行中的任务不能删除，请先取消并等待结束")
+            archived = 0
+            removed: list[str] = []
+            failed: list[str] = []
+            for job in ids:
+                directory = self.store.root / "jobs" / job
+                models_dir = self.store.root / "models" / job
+                try:
+                    if models_dir.exists():
+                        archived += self._archive_job_files(directory, models_dir)
+                    if directory.exists():
+                        shutil.rmtree(directory)
+                except OSError:
+                    _LOG.warning("无法删除任务目录 %s", directory, exc_info=True)
+                    failed.append(job)
+                    continue
+                removed.append(job)
+            if removed:
+                with self.store.db() as db:
+                    placeholders = ",".join("?" for _ in removed)
+                    db.execute(f"DELETE FROM jobs WHERE id IN ({placeholders})", removed)
+            return {"deleted": len(removed), "archived": archived, "failed": failed}
+
+    def delete_versions(self, version_ids) -> dict:
+        ids = self._clean_ids(version_ids, "版本")
+        with self.train_lock, self.version_lock:
+            with self.store.db() as db:
+                placeholders = ",".join("?" for _ in ids)
+                rows = {
+                    row["id"]: dict(row)
+                    for row in db.execute(f"SELECT * FROM models WHERE id IN ({placeholders})", ids)
+                }
+                if len(rows) != len(ids):
+                    raise ValueError("选择中有不存在的版本，请刷新后重试")
+                active = db.execute(
+                    f"SELECT value FROM settings WHERE key LIKE 'active:%' AND value IN ({placeholders})", ids
+                ).fetchone()
+                if active is not None:
+                    raise ValueError(f"版本 {active[0][:8]} 正在使用中，请先启用其他版本")
+                states = {"queued": "排队中", "running": "运行中", "pausing": "正在暂停", "paused": "已暂停", "cancelling": "正在取消"}
+                for job, state in db.execute(
+                    "SELECT id,state FROM jobs WHERE state NOT IN ('complete','failed','cancelled','interrupted')"
+                ):
+                    try:
+                        snapshot = json.loads((self.store.root / "jobs" / job / "snapshot.json").read_text("utf-8"))
+                    except (OSError, ValueError):
+                        continue
+                    parent = snapshot.get("parent")
+                    if parent in ids:
+                        raise ValueError(
+                            f"版本 {parent[:8]} 正被{states.get(state, state)}任务 {job[:8]} 用作父模型，请先取消该任务"
+                        )
+            released = 0
+            removed: list[str] = []
+            failed: list[str] = []
+            for version in ids:
+                directory = self.store.root / "models" / version
+                try:
+                    size = self.store.model_size(version)
+                    if directory.exists():
+                        shutil.rmtree(directory)
+                except OSError:
+                    _LOG.warning("无法删除模型目录 %s", directory, exc_info=True)
+                    failed.append(version)
+                    continue
+                released += size
+                removed.append(version)
+            if removed:
+                with self.store.db() as db:
+                    placeholders = ",".join("?" for _ in removed)
+                    db.execute(f"DELETE FROM models WHERE id IN ({placeholders})", removed)
+                    # A deleted rollback target must not leave the button enabled.
+                    db.execute(f"DELETE FROM settings WHERE key LIKE 'previous:%' AND value IN ({placeholders})", removed)
+            return {"deleted": len(removed), "failed": failed, "released": released}
+
+    @staticmethod
+    def _clean_ids(values, noun: str) -> list[str]:
+        parsed = values
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except ValueError as exc:
+                raise ValueError(f"{noun}编号格式不正确") from exc
+        if not isinstance(parsed, list):
+            raise ValueError(f"{noun}编号格式不正确")
+        values = [str(value).strip() for value in parsed]
+        if any(len(value) != 32 or any(c not in "0123456789abcdef" for c in value) for value in values):
+            raise ValueError(f"无效{noun}编号")
+        values = list(dict.fromkeys(values))
+        if not values:
+            raise ValueError(f"请先选择{noun}")
+        if len(values) > DELETE_LIMIT:
+            raise ValueError(f"每次最多删除 {DELETE_LIMIT} 条{noun}记录")
+        return values
+
+    @staticmethod
+    def _archive_job_files(directory: Path, models_dir: Path) -> int:
+        """Keep the report and snapshot with the model; they are what its page reads."""
+        copied = 0
+        for name in ("report.json", "snapshot.json"):
+            source = directory / name
+            destination = models_dir / name
+            if not source.exists() or destination.exists():
+                continue
+            try:
+                atomic_json(destination, json.loads(source.read_text("utf-8")))
+            except (OSError, ValueError) as exc:
+                raise OSError(f"无法留档 {name}") from exc
+            copied += 1
+        return copied
 
     @staticmethod
     def _snapshot_meta(path: Path):
@@ -390,7 +525,6 @@ class Service:
     def mark_training(self, active: bool) -> None:
         """Lend CPU back to training; the next tick applies it to the worker."""
         with self._state:
-            self.training_active = active
             self.desired_threads = 1 if active else 0
 
     @property
@@ -820,11 +954,18 @@ class Service:
                 raise ValueError("推理服务正在启动（首次加载 PyTorch 较慢），请稍后重试")
             if state != "ready":
                 raise ValueError(self.last_error or "推理服务未能启动，请检查运行环境")
-        payload = {"operation": "load", "character": character, "version": version}
-        result = self.exchange(payload, 8)
-        if result.get("status") != "ready":
-            raise ValueError(result.get("error", "模型加载失败"))
-        self.store.set_active(character, version)
+        with self.version_lock:
+            with self.store.db() as db:
+                row = db.execute("SELECT character FROM models WHERE id=?", (version,)).fetchone()
+            if row is None:
+                raise ValueError("版本不存在")
+            if row[0] and row[0] != character:
+                raise ValueError("版本属于其他角色")
+            payload = {"operation": "load", "character": character, "version": version}
+            result = self.exchange(payload, 8)
+            if result.get("status") != "ready":
+                raise ValueError(result.get("error", "模型加载失败"))
+            self.store.set_active(character, version)
         return result
 
     def rollback(self, character: str) -> dict:

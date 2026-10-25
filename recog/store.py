@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+import logging
 
 from .images import decode, fingerprint, similar, thumbnail
 from .scores import (
@@ -18,24 +19,37 @@ from .scores import (
     EVALUATION_THRESHOLD,
     MAX_THRESHOLD,
     MIN_THRESHOLD,
-    NEG_LABELS,
-    STYLE_LABELS,
-    STYLE_MIN_COUNT,
-    TEXT_LABELS,
 )
 
-# 内容类型（媒材）单轴。只有这一轴有实测效应：同人厚涂插画召回 2%，平涂 Q 版贴纸 91%。
-# 名称刻意与「官方/二创」无关 —— 那对差别不是召回差异的来源（docs/p0-change-list.md）。
-STYLES = STYLE_LABELS
-NEG_TYPES = NEG_LABELS
-# 文字叠加：与三档正交的标记，不是第四种画法。
-TEXT_MARKS = TEXT_LABELS
-# 固定评估集：每档默认 25 张。低于 5 张不给百分比（小样本不给点估计）。
-EVAL_PER_STYLE = 25
-EVAL_PER_NEG_KIND = 15
-EVAL_MIN_COUNT = STYLE_MIN_COUNT
+# 固定评估集：每类默认 25 组。0.5.x 按内容类型分档累加预算（每档 25 / 每个负例
+# 分档 15），0.6.0 撤掉标注轴后扁平为每类一个上限，挑选规则（整批隔离）不变。
+EVAL_PER_LABEL = 25
 # 聊天捕获上限：待确认队列不能变成第二个图库。
 CAPTURE_LIMIT = 100
+# 人工审核口径，也是 100 张配额的口径：未标注、未被自动排除、同组还没有真值。
+# 0.5.22 的入库闸门保证新的聊天图不会带着 reason 进库，所以 reason='' 与队列一致；
+# 老库里 reason!='' 的聊天图不再吃配额，由一次性清理动作处理。
+CAPTURE_REVIEWABLE = (
+    "i.removed=0 AND i.reason='' AND i.label IS NULL AND i.source='chat' "
+    "AND NOT EXISTS (SELECT 1 FROM images o WHERE o.group_id=i.group_id "
+    "AND o.removed=0 AND o.label IN ('self','other'))"
+)
+# 一组只出一条代表，按 id 取最小，保证翻页和撤销后位置稳定。
+CAPTURE_REPRESENTATIVE = (
+    "i.id=(SELECT MIN(c.id) FROM images c WHERE c.group_id=i.group_id AND c.removed=0 "
+    "AND c.label IS NULL AND c.source='chat' AND c.reason='')"
+)
+# WebUI 的「上次选择」。宿主把 custom 页放进 sandbox="allow-scripts" 的 iframe
+# （不透明源），localStorage 会抛 SecurityError，所以只能存在插件库里。
+UI_CHOICES = {
+    "filter": {"all", "eligible", "excluded", "unlabelled", "errors", "removed"},
+    "mode": {"incremental", "fresh"},
+    "device": {"cpu", "cuda"},
+    "job_scope": {"current", "all"},
+    "job_state": {"all", "complete", "failed", "cancelled", "paused"},
+}
+
+_LOG = logging.getLogger("char-recog")
 # 每类留至少这么多组给训练：这是插件能训练的下限，评估集不能把它吃掉。
 EVAL_MIN_TRAIN = 20
 
@@ -102,13 +116,14 @@ class Store:
         with self.db() as db:
             db.executescript("""
               PRAGMA journal_mode=WAL;
-              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', style TEXT NOT NULL DEFAULT '', neg_type TEXT NOT NULL DEFAULT '', has_text TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', model_score REAL);
+              CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', model_score REAL);
               CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, split TEXT);
               CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request_key TEXT UNIQUE, state TEXT, pid INTEGER, error TEXT, created REAL, snapshot_sha TEXT, character TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '', input_size INTEGER);
               CREATE UNIQUE INDEX IF NOT EXISTS one_training ON jobs((1)) WHERE state IN ('queued','running','cancelling');
               CREATE UNIQUE INDEX IF NOT EXISTS one_training_v2 ON jobs((1)) WHERE state IN ('queued','running','pausing','cancelling');
               CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY, job_id TEXT, sha TEXT, metrics TEXT, created REAL, character TEXT NOT NULL DEFAULT '');
               CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
+              CREATE TABLE IF NOT EXISTS job_checkpoints(job_id TEXT PRIMARY KEY, sha TEXT NOT NULL);
               CREATE INDEX IF NOT EXISTS images_group ON images(group_id);
               CREATE INDEX IF NOT EXISTS images_character ON images(character);
             """)
@@ -124,51 +139,76 @@ class Store:
                 db.execute("ALTER TABLE jobs ADD COLUMN device TEXT NOT NULL DEFAULT ''")
             if "input_size" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN input_size INTEGER")
-            # 0.5.12: content type (medium) and negative bucket. Additive only —
-            # every existing row keeps style='' and neg_type='', which reproduces
-            # the 0.5.x behaviour exactly (one '' stratum, no eval set).
-            columns = {row[1] for row in db.execute("PRAGMA table_info(images)")}
-            if "style" not in columns:
-                db.execute("ALTER TABLE images ADD COLUMN style TEXT NOT NULL DEFAULT ''")
-            if "neg_type" not in columns:
-                db.execute("ALTER TABLE images ADD COLUMN neg_type TEXT NOT NULL DEFAULT ''")
-            if "has_text" not in columns:
-                db.execute("ALTER TABLE images ADD COLUMN has_text TEXT NOT NULL DEFAULT ''")
             # 0.5.20: where an image came from, and what the model said when it was
             # captured. A chat-captured image is *not* ground truth, so the score is
             # kept next to it instead of the label.
+            columns = {row[1] for row in db.execute("PRAGMA table_info(images)")}
             if "source" not in columns:
                 db.execute("ALTER TABLE images ADD COLUMN source TEXT NOT NULL DEFAULT ''")
             if "model_score" not in columns:
                 db.execute("ALTER TABLE images ADD COLUMN model_score REAL")
-            # 0.5.18: 「图文/梗图」was a fourth medium that mixed画法 with叠加层. The
-            # information it carried (text on the image) moves to has_text; the
-            # medium stays empty because a meme is usually平涂 but we cannot tell.
-            moved = db.execute("SELECT COUNT(*) FROM images WHERE style='composite'").fetchone()[0]
-            if moved:
-                db.execute(
-                    "UPDATE images SET has_text=CASE WHEN has_text='' THEN 'yes' ELSE has_text END, "
-                    "style='' WHERE style='composite'"
-                )
-                db.execute(
-                    "INSERT OR REPLACE INTO settings VALUES (?,?)",
-                    ("composite_migrated", dump({"moved": moved, "at": time.time()})),
-                )
-            # 0.5.17: 「表情包」left the negative bucket because it is a medium, not an
-            # identity. Leaving the old values in place would make them invisible
-            # everywhere (no label, excluded from eval sampling) instead of merely
-            # wrong, so they are cleared once and the count is kept for diagnosis.
-            stale = db.execute(
-                "SELECT COUNT(*) FROM images WHERE neg_type NOT IN ('', 'other_character', 'non_character')"
-            ).fetchone()[0]
-            if stale:
-                db.execute(
-                    "UPDATE images SET neg_type='' WHERE neg_type NOT IN ('', 'other_character', 'non_character')"
-                )
-                db.execute(
-                    "INSERT OR REPLACE INTO settings VALUES (?,?)",
-                    ("neg_type_reset", dump({"cleared": stale, "at": time.time()})),
-                )
+            # 0.6.0: the annotation axes (medium / text overlay / negative identity)
+            # are removed, physically — a column left behind empty is an invitation
+            # for the next feature to start filling it again. The table is rebuilt
+            # instead of `ALTER TABLE ... DROP COLUMN`, which needs SQLite 3.35+ and
+            # the host's interpreter decides that version, not us. Labels, splits,
+            # sources and model scores carry over unchanged; only the three tags go.
+            #
+            # 0.6.1 起这段重建有三重保证，因为 0.6.0 的版本有两个实测出来的崩溃窗口：
+            #   ① 整个重建包在一个 SAVEPOINT 里 —— SQLite 的 DDL 是事务性的，进程在
+            #      中途死掉会让整段回滚，不会留下「images 没了、数据在 images_v6 里」
+            #      这种既加载不了又救不回来的状态；
+            #   ② 开头先 DROP TABLE IF EXISTS images_v6 —— 上一次尝试若死在
+            #      CREATE 之后、DROP images 之前，会留下半份 images_v6；不先清掉，
+            #      下一次 CREATE 就会撞 "table images_v6 already exists"，
+            #      整个插件再也加载不起来（这个窗口实测可复现）；
+            #   ③ 检测到「有 images_v6 却没有 images」时自动补完 RENAME ——
+            #      那是 0.6.0 已发布版本留下的孤儿状态，老库首次加载要能自愈。
+            tables = {
+                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            columns = {row[1] for row in db.execute("PRAGMA table_info(images)")} if "images" in tables else set()
+            legacy = {"style", "neg_type", "has_text"} & columns
+            orphaned = "images" not in tables and "images_v6" in tables
+            if legacy or orphaned:
+                db.execute("SAVEPOINT migrate_v6")
+                try:
+                    db.execute("DROP TABLE IF EXISTS images_v6")
+                    if orphaned:
+                        # 0.6.0 的迁移死在 DROP TABLE images 之后、RENAME 之前。
+                        # images_v6 里就是全部数据，补完重命名即恢复。
+                        db.execute("ALTER TABLE images_v6 RENAME TO images")
+                    else:
+                        db.execute(
+                            "CREATE TABLE images_v6(id TEXT PRIMARY KEY, path TEXT, sha TEXT, decoded TEXT, phash TEXT, "
+                            "aspect REAL, width INTEGER, height INTEGER, group_id TEXT, label TEXT, removed INTEGER DEFAULT 0, "
+                            "reason TEXT DEFAULT '', created REAL, character TEXT NOT NULL DEFAULT '', "
+                            "source TEXT NOT NULL DEFAULT '', model_score REAL)"
+                        )
+                        db.execute(
+                            "INSERT INTO images_v6(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,"
+                            "created,character,source,model_score) SELECT id,path,sha,decoded,phash,aspect,width,height,group_id,"
+                            "label,removed,reason,created,character,source,model_score FROM images"
+                        )
+                        db.execute("DROP TABLE images")
+                        db.execute("ALTER TABLE images_v6 RENAME TO images")
+                    db.execute("CREATE INDEX IF NOT EXISTS images_group ON images(group_id)")
+                    db.execute("CREATE INDEX IF NOT EXISTS images_character ON images(character)")
+                    if legacy:
+                        db.execute(
+                            "INSERT OR REPLACE INTO settings VALUES (?,?)",
+                            (
+                                "annotation_removed",
+                                dump({"columns": sorted(legacy), "at": time.time()}),
+                            ),
+                        )
+                    db.execute("RELEASE SAVEPOINT migrate_v6")
+                except BaseException:
+                    # 连 CancelledError / KeyboardInterrupt 一起回滚：迁移做一半
+                    # 比不做更危险，绝不能留半成品给下一次加载。
+                    db.execute("ROLLBACK TO SAVEPOINT migrate_v6")
+                    db.execute("RELEASE SAVEPOINT migrate_v6")
+                    raise
 
     @contextmanager
     def db(self) -> Iterator[sqlite3.Connection]:
@@ -189,13 +229,123 @@ class Store:
         with self.db() as db:
             db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
 
+    THUMBNAIL_LIMIT = 4096
+
+    def _trim_thumbnails(self) -> None:
+        """缩略图缓存按 sha 命名、只增不减，与图片库同寿命增长。
+
+        没有上限时一个装了几万张图的库会顺手攒下几万个 512px JPEG。
+        这里按条目数设上限，超了删最旧的；删缓存只是下次多算一次缩略图，
+        不影响正确性，所以失败也只在 debug 级留痕。
+        """
+        cache = self.root / "thumbnails"
+        try:
+            entries = [p for p in cache.iterdir() if p.is_file()]
+        except OSError:
+            return
+        if len(entries) <= self.THUMBNAIL_LIMIT:
+            return
+        entries.sort(key=lambda p: p.stat().st_mtime)
+        for entry in entries[: len(entries) - self.THUMBNAIL_LIMIT]:
+            try:
+                entry.unlink()
+            except OSError as exc:
+                _LOG.debug("淘汰缩略图缓存失败（%s）：%s", entry, exc)
+
+    def sweep_uploads(self, max_age_seconds: float = 86400.0) -> int:
+        """清掉 uploads/ 里超过时限的孤儿文件，返回删除个数。
+
+        `ingest` 的每条退出路径都会移走或删掉自己的文件，所以正常情况下
+        uploads/ 是空的。但只要 `ingest` 抛异常（库锁、IOERR、解码失败、
+        或历史上 0.6.0 的参数个数 bug），那个 `.img` 就永久留在磁盘上，
+        而且**没有任何日志**——用户只看到盘在慢慢涨。
+
+        挂在 on_load 上而不是定时任务：插件重启一次清一次，成本是一次
+        readdir，不需要额外的线程或计时器。`max_age_seconds` 用作保险，
+        避免删掉正在写入的文件（`_capture` 先 write_bytes 再 ingest，
+        两者之间只隔几毫秒，但网络盘上不好说）。
+        """
+        uploads = self.root / "uploads"
+        try:
+            entries = list(uploads.iterdir())
+        except OSError:
+            return 0
+        cutoff = time.time() - max_age_seconds
+        removed = 0
+        for entry in entries:
+            try:
+                if not entry.is_file() or entry.stat().st_mtime > cutoff:
+                    continue
+                entry.unlink()
+                removed += 1
+            except OSError as exc:
+                _LOG.debug("清理上传孤儿文件失败（%s）：%s", entry, exc)
+        if removed:
+            _LOG.info("清理 uploads/ 孤儿文件 %d 个（超过 %d 秒未处理）", removed, int(max_age_seconds))
+        return removed
+
+    def ui_state(self) -> dict:
+        try:
+            stored = json.loads(self.setting("ui_state", "{}"))
+        except (TypeError, ValueError):
+            stored = {}
+        return self._clean_ui(stored if isinstance(stored, dict) else {})
+
+    def set_ui_state(self, patch: dict) -> dict:
+        if not isinstance(patch, dict):
+            raise ValueError("界面状态格式不正确")
+        state = self.ui_state()
+        state.update(self._clean_ui(patch))
+        self.set_setting("ui_state", json.dumps(state, ensure_ascii=False))
+        return state
+
+    @staticmethod
+    def _clean_ui(state: dict) -> dict:
+        """Keep only known options so a stale client cannot smuggle arbitrary values."""
+        clean = {}
+        for key, allowed in UI_CHOICES.items():
+            value = state.get(key)
+            if isinstance(value, str) and value in allowed:
+                clean[key] = value
+        for key in ("character", "capture_character"):
+            if key not in state or not isinstance(state[key], str):
+                continue
+            value = state[key].strip()
+            if (key == "capture_character" and not value) or (value and len(value) <= 32):
+                clean[key] = value
+        if "input_size" in state:
+            value = state["input_size"]
+            if value is None or (type(value) is int and value in (224, 320, 448)):
+                clean["input_size"] = value
+        if isinstance(state.get("device_chosen"), bool):
+            clean["device_chosen"] = state["device_chosen"]
+        return clean
+
+    # 角色名最终会经 plugin.py 的 f-string 原样进入 LLM 上下文提示，所以这里
+    # 不只是「非空 + 限长」：换行、引号、方括号、Unicode 双向控制字符都能改变
+    # 提示词的结构或视觉顺序（自伤型提示注入，提交训练的人可控 32 字符）。
+    # 做法是**黑名单控字符**而不是白名单字符类——角色名要支持中日韩汉字与
+    # 各种 P 主起的怪名字，白名单必然误伤；黑名单只挡「能改变提示词结构」的
+    # 那一小类，正常名字不会碰线。
+    _CHARACTER_RE = None
+
     @staticmethod
     def validate_character(character: str) -> str:
+        import re
+
         if not isinstance(character, str) or not character.strip():
             raise ValueError("缺少角色名")
         character = character.strip()
         if len(character) > 32:
             raise ValueError("角色名过长（最多32字）")
+        if Store._CHARACTER_RE is None:
+            # CR/LF/TAB 能另起一行伪造成新指令；引号与方括号能闭合模板里的
+            # 「」；U+200E/200F/202A-202E/2066-2069 是双向控制符，能视觉上
+            # 重排文字顺序。反斜杠与竖线防转义混淆。
+            forbidden = "\n\r\t\"'`[]{}<>\\|\u200b\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+            Store._CHARACTER_RE = re.compile(rf"[{re.escape(forbidden)}]")
+        if Store._CHARACTER_RE.search(character):
+            raise ValueError("角色名包含不允许的字符（换行、引号、括号或方向控制符）")
         return character
 
     def active(self, character: str) -> str:
@@ -277,30 +427,30 @@ class Store:
             reason = "label_conflict" if len(labels) > 1 else ("duplicate" if index else "")
             db.execute("UPDATE images SET reason=? WHERE id=?", (reason, row["id"]))
 
+    @staticmethod
+    def _skip_capture(path: Path, reason: str) -> dict:
+        """Drop the temp file without touching the catalog.
+
+        Runs in the capture worker thread; failures are logged at debug and never
+        reach the chat path.
+        """
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            _LOG.debug("聊天捕获临时文件未能删除（%s）：%s", path, exc)
+        _LOG.debug("聊天捕获未入库（%s）：%s", reason, path)
+        return {"id": "", "reason": reason, "skipped": True}
+
     def ingest(
         self,
         path: Path,
         label: str | None = None,
         character: str = "",
-        style: str = "",
-        neg_type: str = "",
-        has_text: str = "",
         source: str = "",
         model_score: float | None = None,
     ) -> dict:
         if label not in {None, "self", "other"}:
             raise ValueError("上传身份必须为是Bot或不是Bot")
-        style = (style or "").strip()
-        neg_type = (neg_type or "").strip()
-        has_text = (has_text or "").strip()
-        if style and style not in STYLES:
-            raise ValueError("内容类型必须为平涂/Q版、厚涂插画或实拍")
-        if has_text and has_text not in TEXT_MARKS:
-            raise ValueError("文字叠加必须为有文字或无文字")
-        if neg_type and neg_type not in NEG_TYPES:
-            raise ValueError("负例类型必须为其他角色或非角色内容")
-        if neg_type and label != "other":
-            raise ValueError("只有「不是该角色」的图片才能选负例类型")
         character = self.validate_character(character)
         path = path.resolve()
         if not path.is_relative_to(self.root / "uploads") or path.is_symlink():
@@ -330,6 +480,23 @@ class Store:
             ]
             groups = {r["group_id"] for r in matches}
             splits = {r[0] for g in groups for r in db.execute("SELECT split FROM groups WHERE id=?", (g,)) if r[0]}
+            # 0.5.22: a chat capture is only worth keeping if it can become the
+            # group's usable member. Anything else would be stored as duplicate /
+            # automatic garbage, invisible in the review queue and pure disk cost.
+            # Uploads keep the old behaviour: a variant there is an explicit choice.
+            if source == "chat":
+                if fp["solid"]:
+                    return self._skip_capture(path, "solid")
+                if len(splits) > 1:
+                    return self._skip_capture(path, "split_conflict")
+                if groups:
+                    marks = ",".join("?" for _ in groups)
+                    usable = db.execute(
+                        f"SELECT 1 FROM images WHERE group_id IN ({marks}) AND removed=0 AND reason='' LIMIT 1",
+                        tuple(groups),
+                    ).fetchone()
+                    if usable is not None:
+                        return self._skip_capture(path, "group_covered")
             reason = "solid" if fp["solid"] else ("split_conflict" if len(splits) > 1 else "")
             group = min(groups) if groups and reason != "split_conflict" else ident
             db.execute(
@@ -344,7 +511,7 @@ class Store:
                     db.execute("UPDATE groups SET split=? WHERE id=?", (next(iter(splits)), group))
             shutil.move(path, destination)
             db.execute(
-                "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,style,neg_type,has_text,source,model_score) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",
+                "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,source,model_score) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
                 (
                     ident,
                     str(destination.relative_to(self.root)),
@@ -359,9 +526,6 @@ class Store:
                     reason,
                     time.time(),
                     character,
-                    style,
-                    neg_type,
-                    has_text,
                     source,
                     model_score,
                 ),
@@ -393,94 +557,6 @@ class Store:
             db.execute("UPDATE images SET removed=? WHERE id=?", (int(removed), image_id))
             self._reconcile(db, row[0])
         return {"id": image_id, "removed": removed}
-
-    @staticmethod
-    def validate_style(style: str) -> str:
-        style = (style or "").strip()
-        if style and style not in STYLES:
-            raise ValueError("内容类型必须为平涂/Q版、厚涂插画、实拍或图文/梗图")
-        return style
-
-    @staticmethod
-    def validate_has_text(has_text: str) -> str:
-        has_text = (has_text or "").strip()
-        if has_text and has_text not in TEXT_MARKS:
-            raise ValueError("文字叠加必须为有文字或无文字")
-        return has_text
-
-    @staticmethod
-    def validate_neg_type(neg_type: str) -> str:
-        neg_type = (neg_type or "").strip()
-        if neg_type and neg_type not in NEG_TYPES:
-            raise ValueError("负例类型必须为其他角色、非角色内容或表情包")
-        return neg_type
-
-    def set_style(
-        self, image_id: str, style: str = "", neg_type: str | None = None, has_text: str | None = None
-    ) -> dict:
-        """Tag one image. `None` leaves that field untouched, "" clears it."""
-        style = self.validate_style(style)
-        if neg_type is not None:
-            neg_type = self.validate_neg_type(neg_type)
-        if has_text is not None:
-            has_text = self.validate_has_text(has_text)
-        with self.db() as db:
-            row = db.execute("SELECT label FROM images WHERE id=?", (image_id,)).fetchone()
-            if row is None:
-                raise ValueError("图片不存在")
-            if neg_type and row["label"] != "other":
-                raise ValueError("只有「不是该角色」的图片才能选负例类型")
-            fields, values = ["style=?"], [style]
-            if neg_type is not None:
-                fields.append("neg_type=?")
-                values.append(neg_type)
-            if has_text is not None:
-                fields.append("has_text=?")
-                values.append(has_text)
-            db.execute(f"UPDATE images SET {', '.join(fields)} WHERE id=?", (*values, image_id))
-        return {"id": image_id, "style": style, "neg_type": neg_type, "has_text": has_text}
-
-    def batch_style(
-        self, image_ids, style: str | None = None, neg_type: str | None = None, has_text: str | None = None
-    ) -> dict:
-        """Tag a whole selection in one transaction.
-
-        ``None`` means "leave unchanged" and ``""`` means "clear", so the page can
-        set a medium without silently wiping the negative bucket and vice versa.
-        """
-        if style is None and neg_type is None and has_text is None:
-            raise ValueError("请选择要设置的内容类型、负例类型或文字叠加")
-        if style is not None:
-            style = self.validate_style(style)
-        if neg_type is not None:
-            neg_type = self.validate_neg_type(neg_type)
-        if has_text is not None:
-            has_text = self.validate_has_text(has_text)
-        ids = self.split_ids(image_ids)
-        if not ids or len(ids) > 1000:
-            raise ValueError("请先选择图片，每批最多1000张")
-        if any(len(i) != 32 or any(c not in "0123456789abcdef" for c in i) for i in ids):
-            raise ValueError("无效图片ID")
-        placeholders = ",".join("?" for _ in ids)
-        with self.db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            rows = db.execute(f"SELECT id,label FROM images WHERE id IN ({placeholders})", ids).fetchall()
-            if len(rows) != len(ids):
-                raise ValueError("选择中有不存在的图片，请清空选择后重新选择")
-            if neg_type and any(row["label"] != "other" for row in rows):
-                raise ValueError("选择中包含「是该角色」的图片，不能设负例类型")
-            fields, values = [], []
-            if style is not None:
-                fields.append("style=?")
-                values.append(style)
-            if neg_type is not None:
-                fields.append("neg_type=?")
-                values.append(neg_type)
-            if has_text is not None:
-                fields.append("has_text=?")
-                values.append(has_text)
-            db.execute(f"UPDATE images SET {', '.join(fields)} WHERE id IN ({placeholders})", [*values, *ids])
-        return {"updated": len(ids), "style": style, "neg_type": neg_type, "has_text": has_text}
 
     @staticmethod
     def split_ids(image_ids) -> list:
@@ -552,8 +628,20 @@ class Store:
         record = db.execute("SELECT job_id FROM models WHERE id=?", (version,)).fetchone()
         if record is None:
             raise ValueError("模型版本不存在")
-        snapshot = json.loads((self.root / "jobs" / record[0] / "snapshot.json").read_text("utf-8"))
+        snapshot = self.trained_snapshot(record[0])
+        if snapshot is None:
+            raise ValueError("模型训练记录不完整")
         return snapshot.get("trained_sources", [r for r in snapshot["images"] if r["split"] == "train"])
+
+    def trained_snapshot(self, job_id: str) -> dict | None:
+        """Task snapshots move to models/<job>/ when the task record is cleaned up."""
+        for base in ("jobs", "models"):
+            path = self.root / base / job_id / "snapshot.json"
+            try:
+                return json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError):
+                continue
+        return None
 
     @staticmethod
     def source_seen(row, sources) -> bool:
@@ -566,26 +654,27 @@ class Store:
         view: str = "all",
         job_id: str = "",
         character: str = "",
-        style: str = "",
-        has_text: str = "",
     ) -> dict:
-        character = self.validate_character(character)
-        threshold = self.threshold(character)
-        style = self.validate_style(style)
-        has_text = self.validate_has_text(has_text)
-        if page < 1 or view not in {"all", "eligible", "excluded", "unlabelled", "untyped", "errors", "removed"}:
+        if page < 1 or view not in {"all", "eligible", "excluded", "unlabelled", "errors", "removed", "captured"}:
             raise ValueError("无效分页")
+        # The review queue is cross-character: one list, one pass. Everything else
+        # is scoped, so an empty character means "all" only for that view.
+        if not character and view != "captured":
+            raise ValueError("缺少角色名")
+        if character:
+            character = self.validate_character(character)
+        threshold = self.threshold(character) if character else 0.0
         where = {
             "all": "i.removed=0",
             "eligible": "i.removed=0 AND i.reason='' AND i.label IN ('self','other')",
             "excluded": "(i.removed=1 OR i.reason!='' OR i.label='skip')",
             "unlabelled": "i.label IS NULL",
-            # 0.5.19: the medium tag exists but nothing can find the untagged ones,
-            # which is exactly the list an admin needs to work through.
-            "untyped": "i.removed=0 AND i.reason='' AND i.label IN ('self','other') AND i.style=''",
             "errors": "1",
             "removed": "i.removed=1",
-        }[view] + " AND i.character=?"
+            # 0.5.22: the chat-capture review queue. One row per group so a variant
+            # is not the same question twice.
+            "captured": CAPTURE_REVIEWABLE + " AND " + CAPTURE_REPRESENTATIVE,
+        }[view]
         error_ids = set()
         predictions = {}
         if view == "errors":
@@ -607,37 +696,55 @@ class Store:
                 for r in pairs
                 if ("self" if r["score"] >= threshold else "other") != r["label"]
             }
-        parameters: list = [character]
+        parameters: list = []
+        if character:
+            where += " AND i.character=?"
+            parameters.append(character)
         if view == "errors":
             if error_ids:
                 where += " AND i.id IN (" + ",".join("?" for _ in error_ids) + ")"
-                parameters = [character, *sorted(error_ids)]
+                parameters = [*parameters, *sorted(error_ids)]
             else:
                 where = "0"
                 parameters = []
-        if style:
-            where += " AND i.style=?"
-            parameters = [*parameters, style]
-        if has_text:
-            where += " AND i.has_text=?"
-            parameters = [*parameters, has_text]
         with self.db() as db:
-            sources = self.trained_sources(db, self.active(character))
+            sources = self.trained_sources(db, self.active(character)) if character else []
             total = db.execute(f"SELECT COUNT(*) FROM images i WHERE {where}", parameters).fetchone()[0]
             page = min(page, max(1, (total + 23) // 24))
+            # Capture review is a queue: the most confident grey-zone guesses first,
+            # so early decisions also teach the model the most.
+            order = "i.model_score DESC, i.created ASC" if view == "captured" else "i.created DESC"
             rows = [dict(r) for r in db.execute(
-                f"SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id WHERE {where} ORDER BY i.created DESC LIMIT 24 OFFSET ?",
+                f"SELECT i.*,g.split FROM images i JOIN groups g ON g.id=i.group_id WHERE {where} ORDER BY {order} LIMIT 24 OFFSET ?",
                 [*parameters, (page - 1) * 24],
             )]
+            capture = None
+            if view == "captured":
+                scope = " AND i.character=?" if character else ""
+                scope_args = (character,) if character else ()
+                # pending_groups == total: one reason='' row per group is exactly
+                # what the queue lists, and it is also the quota unit.
+                capture = {
+                    # Counted without the tag filters: the page shows one global
+                    # number, not "how many match the filter".
+                    "pending_groups": db.execute(
+                        f"SELECT COUNT(*) FROM images i WHERE {CAPTURE_REVIEWABLE}{scope}",
+                        scope_args,
+                    ).fetchone()[0],
+                    "auto_rows": db.execute(
+                        "SELECT COUNT(*) FROM images i WHERE i.source='chat' "
+                        f"AND i.label IS NULL AND i.removed=0 AND NOT ({CAPTURE_REVIEWABLE}){scope}",
+                        scope_args,
+                    ).fetchone()[0],
+                    "limit": CAPTURE_LIMIT,
+                }
         index = SourceIndex(sources)
         gallery = []
         for r in rows:
             reasons = {"solid": "纯色/近纯色", "duplicate": "同图变体，仅保留一个代表", "label_conflict": "同图身份标签冲突", "split_conflict": "连接了不同历史划分"}
+            name = r.get("character") or character
             r["status"] = "已移出训练库" if r["removed"] else reasons.get(r["reason"], "跳过" if r["label"] == "skip" else "可用")
-            r["label_text"] = {"self": f"是{character}", "other": f"不是{character}", "skip": "跳过"}.get(r["label"], "未标注")
-            r["style_text"] = STYLES.get(r.get("style") or "", "未标注类型")
-            r["neg_type_text"] = NEG_TYPES.get(r.get("neg_type") or "", "")
-            r["has_text_text"] = TEXT_MARKS.get(r.get("has_text") or "", "")
+            r["label_text"] = {"self": f"是{name}", "other": f"不是{name}", "skip": "跳过"}.get(r["label"], "未标注")
             r["source_text"] = {"chat": "聊天捕获", "webui": "网页上传", "test": "识别测试"}.get(
                 r.get("source") or "", ""
             )
@@ -652,9 +759,9 @@ class Store:
             if prediction:
                 predicted = "self" if prediction["score"] >= threshold else "other"
                 r["model_text"] = (
-                    f"模型：{'是' + character if predicted == 'self' else '不是' + character}"
+                    f"模型：{'是' + name if predicted == 'self' else '不是' + name}"
                     f" · 得分 {prediction['score']:.3f}（阈值 {threshold:.2f}）"
-                    f" · 冻结真值：{'是' + character if prediction['label'] == 'self' else '不是' + character}"
+                    f" · 冻结真值：{'是' + name if prediction['label'] == 'self' else '不是' + name}"
                 )
             else:
                 r["model_text"] = ""
@@ -667,23 +774,167 @@ class Store:
                     "subtitle": f"{r['width']}×{r['height']}",
                 }
             )
+            self._trim_thumbnails()
         for row, preview in zip(rows, gallery):
             row["thumbnail"] = preview["thumbnail"]
-        return {
+        result = {
             "rows": rows,
             "pages": max(1, (total + 23) // 24),
             "total": total,
             "pagination": {"page": page, "pages": max(1, (total + 23) // 24), "total": total},
         }
+        if capture is not None:
+            result["capture"] = capture
+        return result
 
-    def capture_pending(self, character: str) -> int:
-        """How many chat-captured images still wait for a human label."""
-        character = self.validate_character(character)
+    def capture_pending(self, character: str = "") -> int:
+        """Reviewable capture groups: the queue length and the quota unit.
+
+        One group is one decision, so variants of one picture must not consume
+        several slots. The 0.5.22 ingest gate keeps new captures out of the
+        auto-excluded states, so the remaining ``reason!=''`` rows are old data
+        and cannot inflate the queue. ``character=""`` counts every character,
+        which is what the review page shows.
+        """
+        if character:
+            character = self.validate_character(character)
+        scope, args = (" AND i.character=?", (character,)) if character else ("", ())
         with self.db() as db:
             return db.execute(
-                "SELECT COUNT(*) FROM images WHERE character=? AND source='chat' AND label IS NULL AND removed=0",
-                (character,),
+                f"SELECT COUNT(DISTINCT i.group_id) FROM images i WHERE {CAPTURE_REVIEWABLE}{scope}",
+                args,
             ).fetchone()[0]
+
+    def confirm_capture(self, image_id: str, character: str, label: str) -> dict:
+        """Turn one grey-zone capture into ground truth.
+
+        0.6.0 dropped the medium pick from this path: it was the plugin's only
+        hard annotation gate, and asking it here made every review answer cost
+        two decisions instead of one.
+        """
+        character = self.validate_character(character)
+        if label not in {"self", "other"}:
+            raise ValueError("确认结果只能是该角色或不是该角色")
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
+            if row is None:
+                raise ValueError("图片不存在")
+            if row["source"] != "chat":
+                raise ValueError("只能确认聊天捕获的图片")
+            if row["character"] != character:
+                raise ValueError("图片不属于当前角色")
+            if row["reason"] or row["removed"]:
+                raise ValueError("这张图已被自动排除，不能确认")
+            if row["label"] is not None:
+                raise ValueError("这张图已经确认过了")
+            covered = db.execute(
+                "SELECT 1 FROM images WHERE group_id=? AND id<>? AND removed=0 AND label IN ('self','other') LIMIT 1",
+                (row["group_id"], image_id),
+            ).fetchone()
+            if covered:
+                raise ValueError("同组图片已有标注，无需重复确认")
+            db.execute("UPDATE images SET label=? WHERE id=?", (label, image_id))
+            self._reconcile(db, row["group_id"])
+        return {"id": image_id, "label": label}
+
+    def undo_capture(self, image_id: str, character: str) -> dict:
+        """Put one confirmed capture back into the queue (one-step undo)."""
+        character = self.validate_character(character)
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
+            if row is None:
+                raise ValueError("图片不存在")
+            if row["source"] != "chat" or row["character"] != character:
+                raise ValueError("只能撤销当前角色的聊天捕获")
+            if row["label"] not in {"self", "other"}:
+                raise ValueError("这张图还没有确认，无法撤销")
+            if row["reason"] or row["removed"]:
+                raise ValueError("这张图已被自动排除或移出训练库，无法撤销")
+            other = db.execute(
+                "SELECT 1 FROM images WHERE group_id=? AND id<>? AND removed=0 AND label IN ('self','other') LIMIT 1",
+                (row["group_id"], image_id),
+            ).fetchone()
+            if other:
+                raise ValueError("同组还有已标注图片，撤销会破坏同组真值")
+            db.execute("UPDATE images SET label=NULL WHERE id=?", (image_id,))
+            self._reconcile(db, row["group_id"])
+        return {"id": image_id, "label": None}
+
+    def _delete_captures(self, db, rows) -> list:
+        """Drop rows and empty groups; return files to remove after commit.
+
+        File removal is deferred because the caller still owns the transaction:
+        deleting a file inside it would leave a record pointing at nothing after
+        a rollback. The shared-sha check runs after all rows are gone so a batch
+        of duplicates can still free its thumbnail.
+        """
+        doomed = list(rows)
+        for row in doomed:
+            db.execute("DELETE FROM images WHERE id=?", (row["id"],))
+        files = []
+        for row in doomed:
+            if not db.execute("SELECT 1 FROM images WHERE group_id=? LIMIT 1", (row["group_id"],)).fetchone():
+                db.execute("DELETE FROM groups WHERE id=?", (row["group_id"],))
+            shared = db.execute("SELECT 1 FROM images WHERE sha=? LIMIT 1", (row["sha"],)).fetchone()
+            files.append((row["path"], row["sha"], bool(shared)))
+        return files
+
+    def _drop_capture_files(self, files) -> None:
+        for path_text, sha, shared in files:
+            path = (self.root / path_text).resolve()
+            if not path.is_relative_to(self.root / "images"):
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                # The record is already gone; a stuck file must not report failure
+                # and invite a second click on a row that no longer exists.
+                _LOG.warning("聊天捕获文件未能删除（%s）：%s", path, exc)
+            if not shared:
+                try:
+                    (self.root / "thumbnails" / (sha + "-512.jpg")).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def purge_capture(self, image_id: str, character: str) -> dict:
+        """Delete an unconfirmed chat capture for good: the row *and* the file."""
+        character = self.validate_character(character)
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
+            if row is None:
+                raise ValueError("图片不存在")
+            if row["source"] != "chat" or row["character"] != character:
+                raise ValueError("只能删除当前角色的聊天捕获")
+            if row["label"] is not None:
+                raise ValueError("已经确认的图片不能在这里删除；请到图片标注页移出训练库")
+            files = self._delete_captures(db, [row])
+        self._drop_capture_files(files)
+        return {"id": image_id, "deleted": True}
+
+    def purge_auto_captures(self, character: str = "") -> dict:
+        """One-off cleanup for chat captures the catalog already excluded.
+
+        The ingest gate stops new rows from landing in these states, so what is
+        left is historical junk that occupies disk without ever reaching review.
+        ``label IS NULL`` is deliberate: a ``label_conflict`` row carries a
+        human label, and deleting it would destroy ground truth. The page is
+        cross-character, so ``character=""`` cleans every character.
+        """
+        if character:
+            character = self.validate_character(character)
+        scope, args = (" AND character=?", (character,)) if character else ("", ())
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                f"SELECT * FROM images WHERE source='chat' AND reason!='' AND label IS NULL{scope}",
+                args,
+            ).fetchall()
+            files = self._delete_captures(db, rows)
+        self._drop_capture_files(files)
+        return {"deleted": len(rows)}
 
     def training_readiness(self, character: str) -> dict:
         character = self.validate_character(character)
@@ -715,11 +966,7 @@ class Store:
             "good": "样本量足够。继续增加仍是净收益，但边际变小。",
         }[level]
         negative_thin = counts["self"] >= 20 and counts["other"] < 2 * counts["self"]
-        coverage = self.style_coverage(character)
-        missing = [row["label"] for row in coverage if row["verdict"] == "missing"]
-        eval_groups = sum(row["eval"] for row in coverage)
-        labelled = sum(row["train"] + row["eval"] + row["other"] for row in coverage if row["style"])
-        coverage_text = " · ".join(f"{row['label']} {row['train']}" for row in coverage if row["style"])
+        eval_groups = self.eval_groups(character)
         return {
             "can_train": min(counts.values()) >= 20,
             "has_model": bool(active),
@@ -727,67 +974,30 @@ class Store:
             "level": level,
             "advice": advice,
             "negative_thin": negative_thin,
-            "coverage": coverage,
-            "coverage_text": coverage_text,
-            "coverage_missing": missing,
             "eval_groups": eval_groups,
+            # Groups, not rows: the training page shows decisions to make.
             "capture_pending": self.capture_pending(character),
             # Only computed when it can answer something: "重建会付出什么代价".
-            # Skipped when an eval set exists or nothing is tagged (no plan possible).
-            "eval_plan": None if eval_groups or not labelled else self.eval_plan(character),
+            # Skipped when an eval set already exists (nothing to plan).
+            "eval_plan": None if eval_groups else self.eval_plan(character),
             "summary": f"「{character}」可训练独立图组：是 {counts['self']} / 不是 {counts['other']}。每类至少20组，重复变体只算一组。",
             "groups": counts,
         }
 
-    def style_coverage(self, character: str) -> list:
-        """训练集/评估集各档的实际组数。空档返回 verdict=missing，永远可输出。"""
+    def eval_groups(self, character: str) -> int:
+        """How many groups the fixed evaluation set currently holds.
+
+        0.6.0 replaced the per-medium coverage table with this single number: the
+        eval set still exists (it is what makes reports comparable), but it is no
+        longer sliced by an annotation nobody could apply consistently.
+        """
         character = self.validate_character(character)
         with self.db() as db:
-            rows = db.execute(
-                "SELECT i.style,g.split,COUNT(DISTINCT i.group_id) AS count FROM images i "
-                "JOIN groups g ON g.id=i.group_id WHERE i.character=? AND i.removed=0 AND i.reason='' "
-                "AND i.label='self' GROUP BY i.style,g.split",
+            return db.execute(
+                "SELECT COUNT(DISTINCT i.group_id) FROM images i JOIN groups g ON g.id=i.group_id "
+                "WHERE i.character=? AND i.removed=0 AND i.reason='' AND g.split='eval'",
                 (character,),
-            ).fetchall()
-        counts: dict = {}
-        for row in rows:
-            bucket = counts.setdefault(row["style"] or "", {"train": 0, "eval": 0, "other": 0})
-            if row["split"] == "eval":
-                bucket["eval"] += row["count"]
-            elif row["split"] in ("train", None, ""):
-                # Unassigned rows are trainable, not "other": coverage is asked
-                # before the first freeze as often as after it.
-                bucket["train"] += row["count"]
-            else:
-                bucket["other"] += row["count"]
-        result = []
-        for style, label in STYLES.items():
-            bucket = counts.get(style, {"train": 0, "eval": 0, "other": 0})
-            verdict = "missing" if bucket["train"] + bucket["eval"] == 0 else (
-                "eval_only" if bucket["train"] == 0 else "covered"
-            )
-            result.append(
-                {
-                    "style": style,
-                    "label": label,
-                    "train": bucket["train"],
-                    "eval": bucket["eval"],
-                    "other": bucket["other"],
-                    "verdict": verdict,
-                }
-            )
-        untagged = counts.get("", {"train": 0, "eval": 0, "other": 0})
-        result.append(
-            {
-                "style": "",
-                "label": "未标注",
-                "train": untagged["train"],
-                "eval": untagged["eval"],
-                "other": untagged["other"],
-                "verdict": "untagged" if sum(untagged.values()) else "empty",
-            }
-        )
-        return result
+            ).fetchone()[0]
 
     def eval_plan(self, character: str) -> dict:
         """What `rebuild_eval` would take, without writing anything.
@@ -806,24 +1016,17 @@ class Store:
                 )
             ]
         if not rows:
-            return {"groups": 0, "by_style": {}, "by_neg": {}, "from_train": 0, "from_test": 0,
-                    "from_val": 0, "from_other": 0}
+            return {"groups": 0, "from_train": 0, "from_test": 0, "from_val": 0, "from_other": 0}
         picked, unisolated = self._pick_eval_groups(rows)
         first: dict = {}
         for row in rows:
             first.setdefault(row["group_id"], row)
-        by_style: dict = {}
-        by_neg: dict = {}
         counts = {"from_train": 0, "from_test": 0, "from_val": 0, "from_other": 0}
         for group in picked:
             row = first[group]
-            if row["label"] == "self" and row["style"]:
-                by_style[row["style"]] = by_style.get(row["style"], 0) + 1
-            elif row["label"] == "other" and row["neg_type"]:
-                by_neg[row["neg_type"]] = by_neg.get(row["neg_type"], 0) + 1
             key = {"train": "from_train", "test": "from_test", "val": "from_val"}.get(row["split"], "from_other")
             counts[key] += 1
-        return {"groups": len(picked), "by_style": by_style, "by_neg": by_neg, "unisolated": unisolated, **counts}
+        return {"groups": len(picked), "unisolated": unisolated, **counts}
 
     def _ensure_eval(self, db: sqlite3.Connection, character: str) -> dict:
         """Build the fixed evaluation set once, using only unassigned groups.
@@ -860,7 +1063,7 @@ class Store:
             )
         return {
             "built": bool(picked),
-            "reason": "created" if picked else "no_style",
+            "reason": "created" if picked else "nothing_picked",
             "groups": len(picked),
             "unisolated": unisolated,
         }
@@ -868,19 +1071,17 @@ class Store:
     @staticmethod
     def _pick_eval_groups(
         rows: list,
-        per_style: int = EVAL_PER_STYLE,
-        neg_per_kind: int = EVAL_PER_NEG_KIND,
+        per_label: int = EVAL_PER_LABEL,
         seed: int = 2026,
     ) -> tuple:
-        """Pick whole (style, width, height) batches; a batch never crosses sides.
+        """Pick whole (width, height) batches; a batch never crosses sides.
 
         Batch identity is a proxy for source: `洛天依4` had 47/151 images at
         1242×1863, and splitting that batch randomly is what made 0.5.8's 82%
-        look better than it is. The budget is per medium, but the reserve is per
-        label — a library can spare 25 images for evaluation only if it keeps the
-        20 groups that training requires.
+        look better than it is. 0.6.0 dropped the medium axis, so the budget is
+        per label instead of per bucket; the isolation rule is unchanged.
 
-        A batch is taken whole unless it is the only batch for that medium and
+        A batch is taken whole unless it is the only batch for that label and
         would break the reserve; then it is sampled inside and reported as
         unisolated rather than silently pretending the isolation held.
         """
@@ -890,61 +1091,42 @@ class Store:
             representatives.setdefault(row["group_id"], row)
         picked: list = []
         unisolated: list = []
-        for label, field, wanted, values, allow_blank in (
-            ("self", "style", per_style, tuple(STYLES), False),
-            # "" is a real bucket for negatives: a negative whose identity was never
-            # bucketed still has to be evaluated, otherwise the FPR column is empty
-            # for every user who only tagged the medium.
-            ("other", "neg_type", neg_per_kind, (*NEG_TYPES, ""), True),
-        ):
-            cohort = [
-                r
-                for r in representatives.values()
-                if r["label"] == label and (allow_blank or r[field])
-            ]
+        for label in ("self", "other"):
+            cohort = [r for r in representatives.values() if r["label"] == label]
+            # The reserve is per label: a library can spare images for evaluation
+            # only if it keeps the 20 groups that training requires.
             budget = max(0, len(cohort) - EVAL_MIN_TRAIN)
+            wanted = min(per_label, budget)
+            if wanted <= 0:
+                continue
+            batches: dict = {}
+            for row in cohort:
+                batches.setdefault((row["width"], row["height"]), []).append(row)
+            # Small batches first: they are the ones that would otherwise be
+            # crowded out, and they are the cheapest whole batches to take.
+            keys = sorted(batches, key=lambda key: (len(batches[key]), key))
+            rng.shuffle(keys)
+            keys.sort(key=lambda key: len(batches[key]))
             taken = 0
-            # Rarest medium first: a 3-image bucket must not be crowded out by the
-            # dominant one, because it is exactly the bucket most likely to be the
-            # weak spot the report is supposed to find.
-            order = sorted(values, key=lambda value: sum(1 for r in cohort if r[field] == value))
-            for value in order:
-                if budget - taken <= 0:
+            for key in keys:
+                if taken >= wanted:
                     break
-                subset = [r for r in cohort if r[field] == value]
-                if not subset:
+                batch = batches[key]
+                if len(batch) <= wanted - taken:
+                    picked.extend(row["group_id"] for row in batch)
+                    taken += len(batch)
                     continue
-                style_budget = min(wanted, budget - taken)
-                batches: dict = {}
-                for row in subset:
-                    batches.setdefault((row["width"], row["height"]), []).append(row)
-                keys = sorted(batches, key=lambda key: (len(batches[key]), key))
-                rng.shuffle(keys)
-                keys.sort(key=lambda key: len(batches[key]))
-                style_taken = 0
-                for key in keys:
-                    if style_taken >= style_budget:
-                        break
-                    batch = batches[key]
-                    if len(batch) <= style_budget - style_taken:
-                        picked.extend(row["group_id"] for row in batch)
-                        style_taken += len(batch)
-                        continue
-                    if style_taken == 0:
-                        sample = rng.sample(batch, style_budget)
-                        picked.extend(row["group_id"] for row in sample)
-                        unisolated.append(
-                            {"label": label, "style": value, "batch": len(batch), "taken": style_budget}
-                        )
-                        style_taken = style_budget
-                taken += style_taken
+                if taken == 0:
+                    sample = rng.sample(batch, wanted)
+                    picked.extend(row["group_id"] for row in sample)
+                    unisolated.append({"label": label, "batch": "×".join(str(part) for part in key), "size": len(batch), "taken": wanted})
+                    taken = wanted
         return list(dict.fromkeys(picked)), unisolated
 
     def rebuild_eval(
         self,
         character: str,
-        per_style: int = EVAL_PER_STYLE,
-        neg_per_kind: int = EVAL_PER_NEG_KIND,
+        per_label: int = EVAL_PER_LABEL,
         seed: int | None = None,
     ) -> dict:
         """Explicit admin action: re-pick the eval set from all eligible groups.
@@ -953,8 +1135,8 @@ class Store:
         so reports before/after are not comparable — the report says so.
         """
         character = self.validate_character(character)
-        if type(per_style) is not int or not 5 <= per_style <= 200:
-            raise ValueError("每档评估张数必须在 5 到 200 之间")
+        if type(per_label) is not int or not 5 <= per_label <= 200:
+            raise ValueError("每类评估张数必须在 5 到 200 之间")
         with self.db() as db:
             rows = [
                 dict(r)
@@ -968,9 +1150,9 @@ class Store:
             raise ValueError("该角色还没有可用于评估的图片")
         # Deterministic by default: `eval_plan` promises the user an exact cost in the
         # confirmation dialog, so the pick that follows must be the same pick.
-        picked, unisolated = self._pick_eval_groups(rows, per_style, neg_per_kind, 2026 if seed is None else seed)
+        picked, unisolated = self._pick_eval_groups(rows, per_label, 2026 if seed is None else seed)
         if not picked:
-            raise ValueError("没有已标注内容类型的图片，无法建立评估集")
+            raise ValueError("可用于评估的图组不足，无法建立评估集")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             # Release the old eval set first: otherwise a rebuild only ever grows it.
@@ -1004,17 +1186,34 @@ class Store:
             )
         ]
         # A labelled variant can supply the group truth to its unlabelled representative.
+        # 0.6.1 之前这里对每个未标注行跑两次查询（N+1），且 split 用
+        # `.fetchone()[0]` 直接取值 —— groups 缺行时是 TypeError 而不是
+        # 业务上该抛的 ValueError。改成一次查两张表在内存里 JOIN。
         representatives = {r["group_id"]: r for r in rows}
-        for r in db.execute("SELECT * FROM images WHERE character=? AND removed=0 AND reason='' AND label IS NULL", (character,)):
-            truth = db.execute(
-                "SELECT label FROM images WHERE group_id=? AND label IN ('self','other') AND removed=0 LIMIT 1",
-                (r["group_id"],),
-            ).fetchone()
-            if truth:
-                value = dict(r)
-                value["label"] = truth[0]
-                value["split"] = db.execute("SELECT split FROM groups WHERE id=?", (r["group_id"],)).fetchone()[0]
-                representatives[r["group_id"]] = value
+        truth_by_group = {}
+        for r in db.execute(
+            "SELECT group_id,label FROM images WHERE character=? AND removed=0 AND reason='' "
+            "AND label IN ('self','other') ORDER BY id",
+            (character,),
+        ):
+            truth_by_group.setdefault(r["group_id"], r["label"])
+        split_by_group = {
+            r["id"]: r["split"] for r in db.execute("SELECT id,split FROM groups")
+        }
+        for r in db.execute(
+            "SELECT * FROM images WHERE character=? AND removed=0 AND reason='' AND label IS NULL",
+            (character,),
+        ):
+            truth = truth_by_group.get(r["group_id"])
+            if not truth:
+                continue
+            value = dict(r)
+            value["label"] = truth
+            split = split_by_group.get(r["group_id"])
+            if split is None:
+                raise ValueError(f"图片组 {r['group_id']} 缺少划分信息，请重新划分")
+            value["split"] = split
+            representatives[r["group_id"]] = value
         rows = list(representatives.values())
         rng = random.Random(42)
         for label in ("self", "other"):
@@ -1080,9 +1279,31 @@ class Store:
         }
 
     def report(self, job_id: str) -> dict:
-        self.job(job_id)  # reject arbitrary paths
-        path = self.root / "jobs" / job_id / "report.json"
-        return json.loads(path.read_text("utf-8")) if path.exists() else {}
+        with self.db() as db:
+            known = db.execute(
+                "SELECT 1 FROM jobs WHERE id=? UNION ALL SELECT 1 FROM models WHERE id=?", (job_id, job_id)
+            ).fetchone()
+        if known is None:
+            raise ValueError("任务不存在")
+        for base in ("jobs", "models"):
+            path = self.root / base / job_id / "report.json"
+            try:
+                text = path.read_text("utf-8")
+            except OSError:
+                continue
+            return json.loads(text)
+        return {}
+
+    def job_or_model(self, job_id: str) -> dict:
+        """The live job row, or the model row once the task record was cleaned up."""
+        with self.db() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is not None:
+                return dict(row)
+            row = db.execute("SELECT * FROM models WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError("任务不存在")
+        return {**dict(row), "state": "complete"}
 
     def job(self, job_id: str) -> dict:
         with self.db() as db:
@@ -1090,6 +1311,29 @@ class Store:
         if row is None:
             raise ValueError("任务不存在")
         return dict(row)
+
+    def checkpoint_sha(self, job_id: str) -> str | None:
+        """服务端持有的断点哈希，与被校验的 resume.pt 分处两个文件。
+
+        0.6.1 之前这个值写在 resume.pt 同目录的 resume-audit.json 里，由同一个
+        worker 紧跟着 torch.save 写入 —— 同目录同写者，伪造一对即可通过校验。
+        改存数据库后，「能写 resume.pt」不再等于「能让校验通过」。
+        """
+        with self.db() as db:
+            row = db.execute("SELECT sha FROM job_checkpoints WHERE job_id=?", (job_id,)).fetchone()
+        return row["sha"] if row else None
+
+    def set_checkpoint_sha(self, job_id: str, sha: str) -> None:
+        with self.db() as db:
+            db.execute(
+                "INSERT INTO job_checkpoints(job_id,sha) VALUES (?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET sha=excluded.sha",
+                (job_id, sha),
+            )
+
+    def forget_checkpoint_sha(self, job_id: str) -> None:
+        with self.db() as db:
+            db.execute("DELETE FROM job_checkpoints WHERE job_id=?", (job_id,))
 
     def backfill_job_meta(self, rows: list, meta) -> None:
         """Persist device/input_size for rows written before 0.4.0.
@@ -1114,3 +1358,14 @@ class Store:
     def models(self) -> list:
         with self.db() as db:
             return [dict(r) for r in db.execute("SELECT * FROM models ORDER BY created DESC")]
+
+    def model_size(self, version: str) -> int:
+        """Bytes the version occupies, including reports archived next to it."""
+        total = 0
+        for item in (self.root / "models" / version).rglob("*"):
+            try:
+                if item.is_file():
+                    total += item.stat().st_size
+            except OSError:
+                continue
+        return total

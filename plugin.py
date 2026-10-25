@@ -23,19 +23,13 @@ from .recog.scores import (
     DEFAULT_THRESHOLD,
     EVALUATION_THRESHOLD,
     JUDGMENT_BAND,
-    STYLE_LABELS,
-    NEG_LABELS,
-    TEXT_LABELS,
-    by_neg,
-    by_style,
-    by_text,
     capture_candidate,
     metrics,
     select_top,
-    style_advice,
     suggest_threshold,
     sweep,
 )
+from .recog.images import MAX_BASE64_BYTES
 
 DEFAULT_CHARACTERS = ["洛天依", "言和", "乐正绫", "乐正龙牙", "徵羽摩柯", "墨清弦", "星尘", "心华"]
 _LOG = logging.getLogger("char-recog")
@@ -74,6 +68,10 @@ class CharacterRecognition(MaiBotPlugin):
         self.service = await offload(Service, self.ctx.paths.data_dir, self.config.worker_python)
         from .recog.environment import recover
         await offload(recover, self.service)
+        # ingest 的任何失败路径都可能在 uploads/ 留下孤儿（含 0.6.0 那个让整条
+        # 聊天捕获静默失效的参数 bug），且不留日志。重启时按时限扫一次，
+        # 否则磁盘会悄悄涨满而没人知道原因。
+        await offload(self.service.store.sweep_uploads)
         await self.sync_characters()
         # Let the monitor warm the worker in the background so the first image
         # does not have to pay the torch import inside a 6 second chat budget.
@@ -121,7 +119,7 @@ class CharacterRecognition(MaiBotPlugin):
                 if part.get("type") not in {"image", "emoji"} or time.monotonic() >= deadline:
                     continue
                 binary = part.get("binary_data_base64")
-                if not isinstance(binary, str) or len(binary) > 28 * 1024 * 1024:
+                if not isinstance(binary, str) or len(binary) > MAX_BASE64_BYTES:
                     continue
                 try:
                     raw = base64.b64decode(binary, validate=True)
@@ -187,6 +185,7 @@ class CharacterRecognition(MaiBotPlugin):
         """Runs in a worker thread. A capture failure must never reach the chat."""
         from .recog.store import CAPTURE_LIMIT
 
+        target = None
         try:
             candidate = capture_candidate(results, CAPTURE_BAND)
             if not candidate:
@@ -198,8 +197,11 @@ class CharacterRecognition(MaiBotPlugin):
             target.write_bytes(raw)
             # label=None: this is the model's guess, not ground truth. Writing
             # "self" here would train the next model on its own output.
+            # 0.6.0 起 ingest 只收 (path, label, character, source, model_score)：
+            # 三个已删除的标注轴参数不得再传，否则 TypeError 会让整条聊天捕获
+            # 链路静默失效（异常被下面的 except 吞掉，只留一行 WARNING）。
             self.service.store.ingest(
-                target, None, character, "", "", "", "chat", round(float(candidate["score"]), 6)
+                target, None, character, "chat", round(float(candidate["score"]), 6)
             )
         except (ValueError, OSError) as exc:
             _LOG.debug("聊天图片未入库：%s", exc)
@@ -207,6 +209,14 @@ class CharacterRecognition(MaiBotPlugin):
             # run_in_executor 的返回值无人消费：异常若从这里逃逸，连 asyncio
             # 的 "never retrieved" 警告都不会有（库锁/IOERR 等将完全不可见）。
             _LOG.warning("聊天图片入库异常（%s）：%s", type(exc).__name__, exc)
+        finally:
+            # ingest 成功时文件已被移走；任何失败路径都必须清掉 uploads/ 里的
+            # 孤儿，否则每张待捕获图都会在磁盘上永久留一份（涨盘且无日志）。
+            if target is not None:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    _LOG.debug("清理上传孤儿文件失败：%s", target)
 
     async def _action(self, function, *args, **kwargs) -> dict:
         try:
@@ -227,12 +237,12 @@ class CharacterRecognition(MaiBotPlugin):
         upload_id: str,
         character: str,
         upload_label: str = "self",
-        upload_style: str = "",
-        upload_neg_type: str = "",
-        upload_has_text: str = "",
     ) -> dict:
         if upload_label not in {"self", "other"}:
             return {"success": False, "error": "上传身份必须为是角色或不是角色"}
+        if not upload_id or not isinstance(upload_id, str):
+            # 空 ID 透传给宿主会在对端炸出难定位的异常；先在自己的契约里挡掉。
+            return {"success": False, "error": "上传会话已失效，请重新选择图片"}
         try:
             character = self._validate_character(character)
         except ValueError as exc:
@@ -243,9 +253,6 @@ class CharacterRecognition(MaiBotPlugin):
             Path(claimed["path"]),
             upload_label,
             character,
-            upload_style,
-            upload_neg_type,
-            upload_has_text,
         )
         if result.get("already_exists"):
             result["message"] = "图片已存在，复用原标注"
@@ -256,6 +263,21 @@ class CharacterRecognition(MaiBotPlugin):
         rows = json.loads(await offload(self.service.store.setting, "characters", "[]"))
         return {"rows": rows, "active": sorted(await offload(self.active_versions))}
 
+    @API("self_ui", version="1")
+    async def ui(self) -> dict:
+        return await offload(self.service.store.ui_state)
+
+    @API("self_ui_save", version="1")
+    async def ui_save(self, state: str) -> dict:
+        try:
+            parsed = json.loads(state)
+        except (TypeError, ValueError):
+            return {"success": False, "error": "界面状态不是有效的 JSON"}
+        result = await self._action(self.service.store.set_ui_state, parsed)
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
+        return {"success": True}
+
     @API("self_images", version="1")
     async def images(
         self,
@@ -263,22 +285,31 @@ class CharacterRecognition(MaiBotPlugin):
         view: str = "all",
         character: str = "",
         job_id: str = "",
-        style: str = "",
-        has_text: str = "",
     ) -> dict:
         errors = job_id if view == "errors" else ""
-        try:
-            character = self._validate_character(character)
-        except ValueError as exc:
-            return {"success": False, "error": str(exc)}
-        result = await offload(
-            self.service.store.images, page, view, job_id, character, style, has_text
-        )
+        # The review queue is the one cross-character list; every other view is
+        # scoped and refuses to run without a character.
+        if character or view != "captured":
+            try:
+                character = self._validate_character(character)
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
+        # page/view 由前端直接透传：page=0 或未知 view 会让 store.images 抛
+        # ValueError，而此处 offload 没有兜底，异常会裸奔回前端。先在自己的
+        # 契约里校验，跟其它 API 一样返回 {success: False}。
+        if not isinstance(page, int) or page < 1:
+            return {"success": False, "error": "无效分页"}
+        result = await self._action(self.service.store.images, page, view, job_id, character)
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
         result.update(
             errors_active=bool(errors),
             character=character,
-            source_text=f"错判图片 · 任务 {errors[:8]}（人工标签与模型判断不一致）" if errors else f"图片库 · {character}",
+            source_text=f"错判图片 · 任务 {errors[:8]}（人工标签与模型判断不一致）" if errors
+            else f"图片库 · {character}" if character else "待确认队列 · 全部角色",
         )
+        if isinstance(result.get("capture"), dict):
+            result["capture"]["enabled"] = bool(self.config.chat_capture)
         return result
 
     @API("self_result_promote", version="1")
@@ -298,7 +329,7 @@ class CharacterRecognition(MaiBotPlugin):
         target = self.service.store.root / "uploads" / (uuid.uuid4().hex + ".img")
         target.write_bytes(raw)
         result = await self._action(
-            self.service.store.ingest, target, label, character, "", "", ""
+            self.service.store.ingest, target, label, character
         )
         if isinstance(result, dict) and result.get("success") is False:
             target.unlink(missing_ok=True)
@@ -321,6 +352,39 @@ class CharacterRecognition(MaiBotPlugin):
     @API("self_label_clear", version="1")
     async def label_clear(self, image_id: str) -> dict:
         return await self.label(image_id, "unlabelled")
+
+    @API("self_capture_confirm", version="1")
+    async def capture_confirm(self, image_id: str, character: str, label: str) -> dict:
+        try:
+            character = self._validate_character(character)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return await self._action(self.service.store.confirm_capture, image_id, character, label)
+
+    @API("self_capture_undo", version="1")
+    async def capture_undo(self, image_id: str, character: str) -> dict:
+        try:
+            character = self._validate_character(character)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return await self._action(self.service.store.undo_capture, image_id, character)
+
+    @API("self_capture_purge", version="1")
+    async def capture_purge(self, image_id: str, character: str) -> dict:
+        try:
+            character = self._validate_character(character)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return await self._action(self.service.store.purge_capture, image_id, character)
+
+    @API("self_capture_cleanup", version="1")
+    async def capture_cleanup(self, character: str = "") -> dict:
+        if character:
+            try:
+                character = self._validate_character(character)
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
+        return await self._action(self.service.store.purge_auto_captures, character)
 
     @API("self_image_remove", version="1")
     async def remove_image(self, image_id: str) -> dict:
@@ -357,21 +421,6 @@ class CharacterRecognition(MaiBotPlugin):
     async def batch_remove(self, image_ids: str) -> dict:
         return await self.batch_images(image_ids, "remove")
 
-    @API("self_image_style", version="1")
-    async def image_style(self, image_id: str, style: str = "", neg_type: str = "") -> dict:
-        return await self._action(self.service.store.set_style, image_id, style, neg_type or None)
-
-    @API("self_images_batch_style", version="1")
-    async def batch_style(
-        self,
-        image_ids: str,
-        style: str | None = None,
-        neg_type: str | None = None,
-        has_text: str | None = None,
-    ) -> dict:
-        # Omitted parameter = leave the field alone; "" = clear it.
-        return await self._action(self.service.store.batch_style, image_ids, style, neg_type, has_text)
-
     @API("self_eval_rebuild", version="1")
     async def eval_rebuild(self, character: str = "") -> dict:
         try:
@@ -389,7 +438,8 @@ class CharacterRecognition(MaiBotPlugin):
         environment = await offload(status, self.service)
         if environment.get("detecting"):
             return {"success": False, "error": "正在检测运行环境，请稍后再开始训练"}
-        if not environment.get("installed") or device == "cuda" and not environment.get("cuda"):
+        # 补括号：`and` 优先于 `or`，原写法逻辑正确但极易被读成另一种意思。
+        if not environment.get("installed") or (device == "cuda" and not environment.get("cuda")):
             return {"success": False, "error": "所选设备不可用，请先检查运行环境或安装匹配的PyTorch"}
         result = await self._action(
             self.service.submit, request_key, mode, device, character, input_size or self.config.input_size
@@ -415,12 +465,18 @@ class CharacterRecognition(MaiBotPlugin):
 
     @API("self_select_report", version="1")
     async def select_report(self, job_id: str) -> dict:
-        await offload(self.service.store.job, job_id)
+        # 空 job_id 会让 store.job_or_model 抛 ValueError；offload 无兜底，
+        # 异常会裸奔回前端。统一走 _action 拿错误契约。
+        result = await self._action(self.service.store.job_or_model, job_id)
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
         return {"navigate_page": "training", "navigate_params": {"job_id": job_id}}
 
     @API("self_select_errors", version="1")
     async def select_errors(self, job_id: str) -> dict:
-        row = await offload(self.service.store.job, job_id)
+        row = await self._action(self.service.store.job_or_model, job_id)
+        if isinstance(row, dict) and row.get("success") is False:
+            return row
         if row["state"] != "complete":
             return {"success": False, "error": "任务未完成，错判报告尚未生成"}
         return {
@@ -448,6 +504,35 @@ class CharacterRecognition(MaiBotPlugin):
     async def environment_mode(self, mode: str, python_path: str = "") -> dict:
         return await self._action(self.change_environment, mode, python_path)
 
+    # 自定义 Python 解释器的来源白名单。
+    #
+    # 这个路径最终会被当作**可执行程序**跑起来（`subprocess.Popen`、
+    # `uv pip install --python <它>`、`recog.probes`），所以「能登录 dashboard」
+    # 原本就等于「宿主任意程序执行」。0.6.1 起只接受两类受管位置：
+    #   ① 插件自己的依赖覆盖层 `<data_dir>/dependencies`（run_installer 的落点）；
+    #   ② 宿主动态创建的 venv `<data_dir>/venv*`。
+    # 二者都在插件数据目录内，由插件或宿主管住；其余一律拒绝。
+    _CUSTOM_PYTHON_ROOTS = ("dependencies",)
+
+    def _allowed_python_roots(self) -> list:
+        root = Path(self.ctx.paths.data_dir).resolve()
+        roots = [root / name for name in self._CUSTOM_PYTHON_ROOTS]
+        roots += sorted(root.glob("venv*"))
+        return roots
+
+    def _is_managed_python(self, candidate: Path) -> bool:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return False
+        for base in self._allowed_python_roots():
+            try:
+                resolved.relative_to(base.resolve())
+            except ValueError:
+                continue
+            return True
+        return False
+
     def change_environment(self, mode: str, python_path: str = "") -> dict:
         import sys
 
@@ -463,6 +548,15 @@ class CharacterRecognition(MaiBotPlugin):
                 candidate = next((candidate / name for name in names if (candidate / name).is_file()), candidate / names[0])
             if not candidate.is_file():
                 raise ValueError("Python 解释器不存在；插件不会创建环境")
+            # 白名单只决定「这个路径能不能被当作程序执行」，不影响 host 模式。
+            # 不在名单就拒绝，而不是丢弃凭据继续跑 —— 这里没有凭据可丢，
+            # 但放开的代价是宿主任意代码执行，收益却只是少填一次路径。
+            if not self._is_managed_python(candidate):
+                raise ValueError(
+                    "自定义解释器必须位于插件数据目录内"
+                    f"（{' / '.join(self._CUSTOM_PYTHON_ROOTS)} 或 venv*），"
+                    "以防 dashboard 账号被用来执行宿主任意程序"
+                )
             python = str(candidate.resolve())
         with self.service.train_lock:
             self.service.check_environment_idle()
@@ -548,12 +642,16 @@ class CharacterRecognition(MaiBotPlugin):
     async def cancel(self, job_id: str) -> dict:
         return await self._action(self.service.cancel, job_id)
 
+    @API("self_training_delete", version="1")
+    async def delete_training(self, jobs: str) -> dict:
+        return await self._action(self.service.delete_jobs, jobs)
+
     @API("self_training_report", version="1")
     async def report(self, job_id: str = "") -> dict:
         if not job_id:
             return {"summary": "选择任务以查看报告", "metrics": [], "gallery": [], "pages": 1, "technical": ""}
         try:
-            row = await offload(self.service.store.job, job_id)
+            row = await offload(self.service.store.job_or_model, job_id)
             report = await offload(self.service.store.report, job_id)
         except ValueError as exc:
             return {"summary": str(exc), "metrics": [], "technical": ""}
@@ -580,51 +678,12 @@ class CharacterRecognition(MaiBotPlugin):
 
         validation_metrics = at_gate(validation_predictions, stored_selection.get("validation") or report["test"])
         test_metrics = at_gate(test_predictions, report["test"])
-        # Per-medium numbers come from the fixed eval set only: it is the one split
-        # whose members never change between runs, so the table stays comparable.
+        # The fixed eval set is the one split whose members never change between
+        # runs, so its numbers stay comparable across reports. 0.6.0 keeps the
+        # split and drops the per-bucket tables: a single comparable row instead
+        # of three tables built on a label nobody could apply consistently.
         eval_predictions = report.get("eval_predictions") or []
         eval_metrics = at_gate(eval_predictions, report.get("eval")) if eval_predictions else None
-        style_rows = by_style(eval_predictions, current) if eval_predictions else []
-        try:
-            coverage = await offload(self.service.store.style_coverage, character)
-        except (ValueError, OSError, sqlite3.Error):
-            coverage = []
-        labelled = sum(row["train"] + row["eval"] + row["other"] for row in coverage if row["style"])
-        plan = None
-        # getattr: this is read-only analytics inside a report; a store object that
-        # predates the method (or a host test double) must degrade, not blank the page.
-        planner = getattr(self.service.store, "eval_plan", None)
-        if not eval_predictions and planner is not None:
-            # No eval set: say what rebuilding would cost instead of asking the user
-            # to re-do work they already did.
-            try:
-                plan = await offload(planner, character)
-            except (ValueError, OSError, sqlite3.Error):
-                plan = None
-        styles = {
-            "rows": style_rows,
-            # The identity axis, reported separately from the medium axis: "误报的
-            # 是不是别的角色" is not the same question as "哪类图容易误报".
-            "neg_rows": by_neg(eval_predictions, current) if eval_predictions else [],
-            # A marker, not a fourth medium: reported beside the medium table.
-            "text_rows": by_text(eval_predictions, current) if eval_predictions else [],
-            "text_labels": TEXT_LABELS,
-            "coverage": coverage,
-            "advice": style_advice(
-                coverage,
-                style_rows,
-                evaluated=bool(eval_predictions),
-                labelled=labelled,
-                buildable=(plan or {}).get("groups", 0),
-            ),
-            "evaluated": bool(eval_predictions),
-            "eval_count": len(eval_predictions),
-            "eval_metrics": eval_metrics,
-            "labelled": labelled,
-            "plan": plan,
-            "labels": STYLE_LABELS,
-            "neg_labels": NEG_LABELS,
-        }
         suggestion = None
         sweep_rows = []
         if validation_predictions:
@@ -644,7 +703,8 @@ class CharacterRecognition(MaiBotPlugin):
         summary["当前判定阈值"] = current
         summary["训练时评测阈值"] = selection_threshold
         rows = []
-        for name, m in (("验证", validation_metrics), ("测试", test_metrics)):
+        eval_row = (("评估集", eval_metrics),) if eval_metrics else ()
+        for name, m in (("验证", validation_metrics), ("测试", test_metrics), *eval_row):
             rows.append(
                 {
                     "split": name,
@@ -674,24 +734,21 @@ class CharacterRecognition(MaiBotPlugin):
             f"指标按当前判定阈值 {current:.2f} 重算（训练时评测口径 {selection_threshold:.2f}）\n"
             f"核验：{'通过' if report['audit']['passed'] else '未通过'}"
         )
-        if style_rows:
-            parts = [
-                f"{row['label']} {row['recall']:.0%}" if not row["unreliable"] else f"{row['label']} 样本不足(n={row['n']})"
-                for row in style_rows
-                if row["positives"]
-            ]
-            if parts:
-                readable += "\n分类型（评估集）：" + " · ".join(parts)
-            readable += "\n" + styles["advice"]
-        else:
-            readable += "\n" + styles["advice"]
+        name = time.strftime("训练 %m-%d %H:%M", time.localtime(row["created"])) + (
+            f" · {row['character']}" if row.get("character") else ""
+        )
+        if eval_metrics:
+            readable += (
+                f"\n评估集（{eval_metrics['count']}张，跨版本可比）："
+                f"精确率 {eval_metrics['precision']:.0%} · 召回 {eval_metrics['recall']:.0%}"
+            )
         for row_ in rows:
             for field in ("recall", "f1", "accuracy", "other_recall", "balanced_accuracy"):
                 row_[field] = f"{row_[field]:.1%}"
         return {
+            "name": name,
             "summary": readable,
             "metrics": rows,
-            "styles": styles,
             "technical": json.dumps(summary, ensure_ascii=False),
             "threshold": {
                 "current": current,
@@ -712,6 +769,8 @@ class CharacterRecognition(MaiBotPlugin):
         rows = [r for r in await offload(self.service.store.models) if not character or r.get("character") in {"", character}]
         active = await offload(self.service.store.active, character)
         previous = await offload(self.service.store.previous, character)
+        sizes = await offload(lambda: {row["id"]: self.service.store.model_size(row["id"]) for row in rows})
+        previous_row = next((row for row in rows if row["id"] == previous), None)
         for r in rows:
             m = json.loads(r["metrics"])
             r.update(
@@ -719,6 +778,7 @@ class CharacterRecognition(MaiBotPlugin):
                 status="使用中" if r["id"] == active else "未启用",
                 can_activate=r["id"] != active,
                 input_size=m.get("input_size", 320),
+                size=sizes[r["id"]],
             )
             for split in ("validation", "test"):
                 metric = m[split]
@@ -729,8 +789,8 @@ class CharacterRecognition(MaiBotPlugin):
             "rows": rows,
             "character": character,
             "active": next((r["name"] for r in rows if r["id"] == active), "未启用"),
-            "can_rollback": bool(previous),
-            "rollback_text": next(("回退目标：" + r["name"] for r in rows if r["id"] == previous), "无可回退版本"),
+            "can_rollback": previous_row is not None,
+            "rollback_text": f"回退目标：{previous_row['name']}" if previous_row else "无可回退版本",
             "threshold": await offload(self.service.store.threshold, character),
             "threshold_default": DEFAULT_THRESHOLD,
         }
@@ -760,14 +820,23 @@ class CharacterRecognition(MaiBotPlugin):
             return {"success": False, "error": str(exc)}
         return {**await offload(self.service.store.clear_threshold, character), "success": True}
 
+    def _model_character(self, version: str):
+        """`activate` 的数据库读取，供 offload 丢进线程池。"""
+        with self.service.store.db() as db:
+            row = db.execute("SELECT character FROM models WHERE id=?", (version,)).fetchone()
+        return row[0] if row else None
+
     @API("self_model_activate", version="1")
     async def activate(self, version: str) -> dict:
         """Derive the owning character from the model record."""
-        with self.service.store.db() as db:
-            row = db.execute("SELECT character FROM models WHERE id=?", (version,)).fetchone()
+        # 全文唯一一处 async 里直接碰 SQLite 的地方。WAL 下读不阻塞写，所以
+        # 平时看不出问题；但 `sqlite3.connect(timeout=30)` 意味着一旦 journal_mode
+        # 没成 WAL（网络盘 / 部分 NAS），一次读最长挂住事件循环 30 秒，期间整个
+        # bot 收不到任何消息且日志毫无异常。与其余 46 个 API 一致走 offload。
+        row = await offload(self._model_character, version)
         if row is None:
             return {"success": False, "error": "版本不存在"}
-        character = row[0]
+        character = row
         if not character:
             return {"success": False, "error": "模型记录缺少角色信息，无法启用"}
         return await self._action(self.service.activate, character, version)
@@ -775,6 +844,10 @@ class CharacterRecognition(MaiBotPlugin):
     @API("self_model_rollback", version="1")
     async def rollback(self, character: str = "") -> dict:
         return await self._action(self.service.rollback, character)
+
+    @API("self_models_delete", version="1")
+    async def delete_models(self, versions: str) -> dict:
+        return await self._action(self.service.delete_versions, versions)
 
     @API("self_test_upload", version="1")
     async def test_upload(self, upload_id: str = "", result_id: str = "") -> dict:
@@ -887,7 +960,7 @@ class CharacterRecognition(MaiBotPlugin):
         binary = media[image_index].get("binary_data_base64")
         if not binary:
             return self._tool_result({"status": "image_expired"})
-        if len(binary) > 28 * 1024 * 1024:
+        if len(binary) > MAX_BASE64_BYTES:
             return self._tool_result({"status": "image_too_large"})
         try:
             raw = base64.b64decode(binary, validate=True)

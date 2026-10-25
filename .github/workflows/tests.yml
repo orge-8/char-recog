@@ -1,0 +1,55 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 这个仓库是 MaiBot 插件，CI 的职责只有两件：
+#   ① 跑测试 —— 尤其是 `tests/conftest.py` 装上 SDK 桩后那 28 个此前恒被跳过的
+#      用例。0.6.0 的 `_capture` 参数漏改能溜上线，根因就是没有任何地方会执行
+#      插件层；没有 CI，这个洞还会再开一次。
+#   ② 断流版本声明 —— `test_declared_dependency_ranges_cover_the_installed_versions`
+#      会在「声明区间不覆盖实装版本」时红掉（0.6.0 就这样漂过一次：声明 Pillow
+#      <13，实装 13.0.0，没人发现）。
+#
+# 刻意不做的事：不装 torch / torchvision（几百 MB，且需要 CPU/CUDA 变体），
+# 所以三个需要真实训练/推理的模块会跳过；装上 torch 的完整门禁请在本地跑。
+# 这条边界写在这里，避免后来者以为 CI 全绿就等于可以上线。
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 只装测试直接需要的轻量依赖。torch 系留给本地完整门禁。
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pillow numpy psutil
+
+      - name: Check dependency declarations cover installed versions
+        run: python -m pytest tests/test_release_gate.py -q -k "declared or pinned"
+
+      - name: Run the test suite
+        run: python -m pytest tests -q
+
+      - name: Verify manifest JSON and version agreement
+        run: |
+          python -c "import json; json.load(open('_manifest.json', encoding='utf-8'))"
+          python - <<'PY'
+          import json, re, pathlib
+          manifest = json.loads(pathlib.Path('_manifest.json').read_text(encoding='utf-8'))
+          pyproject = pathlib.Path('pyproject.toml').read_text(encoding='utf-8')
+          declared = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE).group(1)
+          assert manifest["version"] == declared, (
+              f"_manifest.json {manifest['version']} != pyproject.toml {declared}"
+          )
+          print(f"version agreement OK: {declared}")
+          PY

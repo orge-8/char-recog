@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-PAGES = ["images", "training", "models", "test", "environment"]
+PAGES = ["images", "capture", "training", "models", "test", "environment"]
 
 # `operate(node.dataset.<group>, ...)` dispatches to a group of aliases.
 GROUPS = {
@@ -224,13 +224,7 @@ def test_page_declares_the_actions_its_visible_section_triggers():
     """A page must declare every action a control in its own section can fire."""
     for page in PAGES:
         body = visible_section(page)
-        # Two batch buttons reuse one alias; the rest map 1:1.
-        aliases = {
-            "batch_style": "images_batch_style",
-            "batch_neg": "images_batch_style",
-            "batch_text": "images_batch_style",
-        }
-        needed = {aliases.get(value, value) for value in re.findall(r'data-batch="([a-z_]+)"', body)}
+        needed = set(re.findall(r'data-batch="([a-z_]+)"', body))
         if "data-job-action" in body:
             needed |= {"pause", "resume", "cancel"}
         if "data-image-action" in body:
@@ -296,75 +290,28 @@ def test_generated_pages_are_in_sync():
         assert len(html) >= len(source) - 200, f"{page}.html 与共享源明显不同步"
 
 
-def test_upload_action_declares_the_tags_the_page_sends():
-    """startUpload sends upload_style / upload_neg_type through maibot.upload.
+def test_annotation_axes_are_gone_everywhere():
+    """0.6.0 removed the medium / text / negative-identity tags.
 
-    They were added to the page in 0.5.12 but never declared, and because upload
-    goes through the upload binding rather than operate(), no existing test looked
-    at the argument list. An undeclared parameter is dropped or rejected by the
-    host, which would make batch tagging silently do nothing.
+    The guard is deliberate: the tables were deleted because the labels could not
+    be applied consistently, and a column that exists invites a feature to start
+    filling it again. Bringing any of this back needs a reason, not a diff.
     """
     html = (ROOT / "webui" / "index.html").read_text(encoding="utf-8")
-    for name in ("upload_style", "upload_neg_type"):
-        assert name in html, f"页面不再发送 {name}，这条测试的前提已变"
     data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
+    for token in ("upload_style", "upload_has_text", "upload_neg_type", "batch_style", "style-filter", "text-filter"):
+        assert token not in html, f"页面仍引用 {token}"
     for page in data["pages"]:
-        spec = page["actions"].get("upload")
-        if not spec:
-            continue
-        for name in ("upload_style", "upload_neg_type"):
-            assert name in spec["parameters"], f"{page['id']}: upload 未声明 {name}"
-
-
-def test_retired_negative_bucket_is_gone_everywhere():
-    """「表情包」is a medium (style=composite), not an identity — it must not return."""
-    html = (ROOT / "webui" / "index.html").read_text(encoding="utf-8")
-    assert 'value="sticker"' not in html
-    data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
-    for page in data["pages"]:
-        for alias, spec in page["actions"].items():
-            choices = ((spec.get("parameters") or {}).get("neg_type") or {}).get("choices") or []
-            assert "sticker" not in choices, f"{page['id']}.{alias} 仍允许 sticker"
-
-
-def test_upload_declares_the_overlay_marker():
-    """文字叠加 is a marker on its own field, so upload must declare it too."""
-    data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
-    for page in data["pages"]:
-        spec = page["actions"].get("upload")
-        if not spec:
-            continue
-        param = spec["parameters"].get("upload_has_text")
-        assert param is not None, f"{page['id']}: upload 未声明 upload_has_text"
-        assert set(param["choices"]) == {"yes", "no", ""}
-
-
-def test_medium_choices_no_longer_mix_an_overlay():
-    """A fourth medium「图文/梗图」mixed 画法 with 叠加层; it must stay gone."""
-    data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
-    for page in data["pages"]:
-        for alias, spec in page["actions"].items():
-            for name in ("style", "upload_style"):
-                declared = ((spec.get("parameters") or {}).get(name) or {}).get("choices")
-                if not declared:  # this action does not take a medium at all
-                    continue
-                assert "composite" not in declared, f"{page['id']}.{alias} 仍允许 composite"
-                assert len([c for c in declared if c]) == 3, f"{page['id']}.{alias} 画法档数不是 3"
-
-
-def test_picture_query_declares_the_tag_filters():
-    """Tagging without filtering was the gap: the fields existed, the list ignored them."""
-    data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
-    html = (ROOT / "webui" / "index.html").read_text(encoding="utf-8")
-    for page in data["pages"]:
-        query = (page.get("queries") or {}).get("pictures")
-        if not query:
-            continue
-        params = query["parameters"]
-        assert "untyped" in params["view"]["choices"], "../pictures 缺少「未标注类型」视图"
-        assert set(params["style"]["choices"]) == {"flat", "paint", "photo"}
-        assert set(params["has_text"]["choices"]) == {"yes", "no"}
-    assert "style-filter" in html and "text-filter" in html
+        actions = page.get("actions") or {}
+        for alias, spec in actions.items():
+            params = spec.get("parameters") or {}
+            for name in ("style", "has_text", "neg_type", "upload_style", "upload_has_text", "upload_neg_type"):
+                assert name not in params, f"{page['id']}.{alias} 仍声明 {name}"
+            assert alias not in {"image_style", "images_batch_style"}, f"{page['id']} 仍声明 {alias}"
+        for query_name, query in (page.get("queries") or {}).items():
+            params = query.get("parameters") or {}
+            for name in ("style", "has_text"):
+                assert name not in params, f"{page['id']}.{query_name} 仍声明 {name}"
 
 
 def test_recognition_results_can_be_promoted_into_the_library():

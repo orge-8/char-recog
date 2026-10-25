@@ -13,6 +13,10 @@ from PIL import Image, ImageOps, ImageStat
 from .scores import judgment  # re-export: per-character thresholds live in scores.py
 
 MAX_BYTES = 20 * 1024 * 1024
+# base64 会把体积放大 4/3，所以「二进制闸门 × 4/3」才是 base64 字符串的上限。
+# 0.6.1 之前 plugin.py 里硬编码 28 MiB，换算成原始字节是 22.1 MiB，已经越过
+# MAX_BYTES —— 两个口径不一致，改任何一边都会让另一边变成错的。统一从这里推导。
+MAX_BASE64_BYTES = MAX_BYTES * 4 // 3
 MAX_PIXELS = 40_000_000
 # 与 store.freeze 允许的输入尺寸保持一致；解码时按它 draft，避免二次放大。
 MAX_EDGE = 448

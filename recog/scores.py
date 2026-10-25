@@ -17,22 +17,12 @@ MAX_THRESHOLD = 0.95
 # 0.6/0.4 (the 0.3.x behaviour) is exactly threshold / threshold - band.
 JUDGMENT_BAND = 0.2
 
-# Content type (medium) is a single axis on purpose: only this axis has a measured
-# effect on recall (thick-paint fan art 2% vs flat chibi sticker 91%). The names are
-# subject-agnostic so the same four buckets work for game characters, idols or pets.
-STYLE_LABELS = {"flat": "平涂/Q版", "paint": "厚涂插画", "photo": "实拍"}
-# Text overlay is not a way of painting, it is a property that crosses all three
-# mediums: a sticker, a fan art and a doll photo can all carry text. It used to be
-# a fourth medium ("图文/梗图"), which forced one field to answer two questions.
-TEXT_LABELS = {"yes": "有文字叠加", "no": "无文字叠加"}
-# The negative bucket is the *identity* axis only: "was the thing mistaken for the
-# character actually another character, or something that is not a character at
-# all". 「表情包」used to live here and had to go: it is a medium, not an identity,
-# so it overlapped both values above and is already carried by style=composite
-# (图文/梗图). One field, one axis.
-NEG_LABELS = {"other_character": "其他角色", "non_character": "非角色内容"}
-# Below this many eval images a bucket gets no percentage: a 3-image "0%" is noise.
-STYLE_MIN_COUNT = 5
+# 0.6.0 removed the annotation axes (medium / text overlay / negative identity).
+# They only ever fed the per-bucket tables, and the buckets could not be trusted:
+# the medium boundary is subjective enough that the same admin tags the same image
+# differently a week apart. Aggregation over an unreliable label is noise dressed
+# as a diagnosis, so the tables are gone and single-image attribution is done on
+# the misjudged list instead (the "errors" view), where no field is needed.
 # Raw scores from different per-character models are not calibrated against each
 # other, so an exact tie is reported as no call at all. Measured on two real
 # models (洛天依 + 言和) over 241 confident solo images: at 0.08 this dropped 4.6%
@@ -69,145 +59,6 @@ def metrics(labels: list, scores: list, threshold: float = EVALUATION_THRESHOLD)
         "count": len(labels),
         "threshold": threshold,
     }
-
-
-def by_style(predictions: list, threshold: float = EVALUATION_THRESHOLD, min_count: int = STYLE_MIN_COUNT) -> list:
-    """Per-medium recall / false-positive rate on the fixed evaluation set.
-
-    Recall needs positives, FPR needs negatives; a bucket that only has one side
-    reports the other as 0.0 and is marked unreliable, so the UI never renders a
-    percentage that no image supports.
-    """
-    buckets: dict = {}
-    for row in predictions:
-        buckets.setdefault(row.get("style") or "", []).append(row)
-    rows = []
-    for style, items in sorted(buckets.items(), key=lambda kv: (kv[0] == "", kv[0])):
-        labels = [int(row["label"] == "self") for row in items]
-        scores = [row["score"] for row in items]
-        summary = metrics(labels, scores, threshold)
-        positives = sum(labels)
-        negatives = len(labels) - positives
-        rows.append(
-            {
-                "style": style,
-                "label": STYLE_LABELS.get(style, "未标注"),
-                "n": len(items),
-                "positives": positives,
-                "negatives": negatives,
-                "recall": summary["recall"],
-                "fpr": 1 - summary["other_recall"] if negatives else 0.0,
-                "precision": summary["precision"],
-                "unreliable": bool(
-                    len(items) < min_count
-                    or (positives and positives < min_count)
-                    or (negatives and negatives < min_count)
-                ),
-            }
-        )
-    return rows
-
-
-def by_text(predictions: list, threshold: float = EVALUATION_THRESHOLD, min_count: int = STYLE_MIN_COUNT) -> list:
-    """Recall with and without a text overlay, on the fixed evaluation set.
-
-    Reported next to the medium table rather than as a row inside it: it is a
-    marker, so a "有文字" row would double-count the same images.
-    """
-    buckets: dict = {}
-    for row in predictions:
-        buckets.setdefault(row.get("has_text") or "", []).append(row)
-    rows = []
-    for key, items in sorted(buckets.items(), key=lambda kv: (kv[0] == "", kv[0])):
-        labels = [int(row["label"] == "self") for row in items]
-        scores = [row["score"] for row in items]
-        summary = metrics(labels, scores, threshold)
-        positives = sum(labels)
-        negatives = len(labels) - positives
-        rows.append(
-            {
-                "has_text": key,
-                "label": TEXT_LABELS.get(key, "未标注"),
-                "n": len(items),
-                "positives": positives,
-                "negatives": negatives,
-                "recall": summary["recall"],
-                "fpr": 1 - summary["other_recall"] if negatives else 0.0,
-                "unreliable": bool(
-                    len(items) < min_count
-                    or (positives and positives < min_count)
-                    or (negatives and negatives < min_count)
-                ),
-            }
-        )
-    return rows
-
-
-def by_neg(predictions: list, threshold: float = EVALUATION_THRESHOLD, min_count: int = STYLE_MIN_COUNT) -> list:
-    """Per-negative-bucket false-positive rate on the fixed evaluation set.
-
-    Answers the question the medium axis cannot: ``误报的是不是别的角色``. A row with
-    ``neg_type == ""`` is a negative that was never bucketed — it is shown as
-    未标注 rather than dropped, because silently losing it is how the FPR column
-    ends up empty while the page looks fine.
-    """
-    buckets: dict = {}
-    for row in predictions:
-        if row.get("label") != "other":
-            continue
-        buckets.setdefault(row.get("neg_type") or "", []).append(row)
-    rows = []
-    for neg_type, items in sorted(buckets.items(), key=lambda kv: (kv[0] == "", kv[0])):
-        flagged = sum(1 for row in items if row["score"] >= threshold)
-        rows.append(
-            {
-                "neg_type": neg_type,
-                "label": NEG_LABELS.get(neg_type, "未标注"),
-                "n": len(items),
-                "flagged": flagged,
-                "fpr": flagged / len(items),
-                "unreliable": len(items) < min_count,
-            }
-        )
-    return rows
-
-
-def style_advice(coverage: list, styles: list, evaluated: bool = True, labelled: int = 0, buildable: int = 0) -> str:
-    """One actionable sentence: which medium is missing or weakest, and how many to add.
-
-    "No eval set" has two very different causes and they need different actions:
-    nothing is tagged yet (tag more), or the tags exist but the fixed eval set was
-    never built (click rebuild). Telling a library with 264 tagged images to "tag
-    20-25 per type" sends the user to do work they already did.
-    """
-    if not evaluated:
-        if buildable > 0:
-            return (f"已标类型的图有 {labelled} 张，但还没有评估集：到训练页点「重建评估集」，"
-                    "训练后就能看到分档结果。")
-        if labelled > 0:
-            return "已标类型的图还太少，暂时建不出评估集（每类要留 20 组给训练）；先补图或补标。"
-        return "还没有分类型评估：先给图标注内容类型，训练后就能看到哪一类认不出。"
-    missing = [row["label"] for row in coverage if row.get("verdict") == "missing"]
-    usable = [row for row in styles if row["n"] >= STYLE_MIN_COUNT and row["positives"] >= STYLE_MIN_COUNT]
-    parts = []
-    if missing:
-        parts.append("训练集里没有" + "、".join(f"「{name}」" for name in missing) + "类图，遇到这类图基本认不出")
-    if usable:
-        worst = min(usable, key=lambda row: row["recall"])
-        best = max(usable, key=lambda row: row["recall"])
-        if worst is not best and best["recall"] - worst["recall"] >= 0.15:
-            parts.append(
-                f"「{worst['label']}」召回 {worst['recall']:.0%}，"
-                f"比「{best['label']}」低 {(best['recall'] - worst['recall']) * 100:.0f} 个百分点，"
-                "建议再补 30 张这一类"
-            )
-        elif worst["recall"] < 0.6:
-            parts.append(f"「{worst['label']}」召回只有 {worst['recall']:.0%}，建议再补 30 张这一类")
-    if parts:
-        return "；".join(parts) + "。"
-    if usable:
-        return "各类型召回都在同一档，暂时不需要补图。"
-    return "评估集里各类型的样本都不足 5 张，先给每类补到 20–25 张再评估。"
 
 
 def judgment(score: float, threshold: float = DEFAULT_THRESHOLD) -> str:

@@ -50,7 +50,7 @@ def test_report_navigation_does_not_write_shared_settings():
     plugin.service = SimpleNamespace(store=SimpleNamespace(
         style_coverage=lambda character: [],
         validate_character=Store.validate_character,
-        job=lambda job_id: {"state": "complete", "character": "洛天依"},
+        job_or_model=lambda job_id: {"state": "complete", "character": "洛天依", "created": 0},
         images=lambda page, view, job_id, character, style="", has_text="": calls.append(
             (page, view, job_id, character, style, has_text)
         ) or {},
@@ -301,7 +301,7 @@ def test_report_metrics_expose_numeric_values():
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
             style_coverage=lambda character: [],
-            job=lambda job_id: {"character": "洛天依"},
+            job_or_model=lambda job_id: {"character": "洛天依", "created": 0},
             report=lambda job_id: report,
             threshold=lambda character: 0.6,
         )

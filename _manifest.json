@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "0.5.21",
+  "version": "0.6.1",
   "name": "角色识别",
   "description": "按角色标注、训练与版本管理（每角色一个二分类模型）；自动识别收到的图片中的角色并添加上下文提示。基于 SengokuCola/MaiSelfPlugin 泛化改造。",
   "author": {
@@ -26,7 +26,7 @@
     {
       "type": "python_package",
       "name": "Pillow",
-      "version_spec": ">=11,<13"
+      "version_spec": ">=11,<14"
     },
     {
       "type": "python_package",

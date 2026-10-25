@@ -15,6 +15,35 @@ from .images import decode, whole_image
 from .scores import EVALUATION_THRESHOLD, metrics
 
 
+# `weights_only=True` 的白名单默认不含 numpy 的数组重建函数，而断点字典里
+# `np.random.get_state()` 恰好奇是一个含 ndarray 的元组。与其逐个登记
+# `numpy.dtypes.*DType`（实测漏一个就整体加载失败，且 numpy 换版本就变），
+# 不如在存盘时就把 RNG state 转成原生 Python —— 断点里不留 numpy 对象，
+# 白名单问题整类消失，文件也更好跨版本迁移。
+def _dump_numpy_state(state) -> dict:
+    name, keys, pos, has_gauss, cached = state
+    return {
+        "name": str(name),
+        "keys": [int(k) for k in keys.tolist()],
+        "pos": int(pos),
+        "has_gauss": int(has_gauss),
+        "cached_gaussian": float(cached),
+    }
+
+
+def _load_numpy_state(value):
+    """兼容两种形态：0.6.1 起的 dict，与更早版本直接存下来的 tuple。"""
+    if isinstance(value, dict):
+        return (
+            value["name"],
+            np.array(value["keys"], dtype=np.uint32),
+            int(value["pos"]),
+            int(value["has_gauss"]),
+            float(value["cached_gaussian"]),
+        )
+    return value
+
+
 class TrainingPaused(Exception):
     """A verified checkpoint has been saved; release the worker process."""
 
@@ -134,9 +163,6 @@ def evaluate(model: nn.Module, root: Path, rows: list, device: str, batch: int, 
             "label": r["label"],
             "score": s,
             "predicted": "self" if s >= threshold else "other",
-            "style": r.get("style") or "",
-            "neg_type": r.get("neg_type") or "",
-            "has_text": r.get("has_text") or "",
         }
         for r, s in zip(rows, scores)
     ]
@@ -168,8 +194,15 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     for parameter in model.classifier.parameters():
         parameter.requires_grad = True
     rows = snapshot["images"]
-    if any(hashlib.sha256((root / r["path"]).read_bytes()).hexdigest() != r["sha"] for r in rows):
-        raise ValueError("冻结原图哈希变化")
+    # 训练前闸门：逐张算 sha 确认原图没被换掉。这一遍躲不开 —— 它是唯一能发现
+    # 「图库被篡改」的地方，而且结果正好给下面的复用缓存打底。
+    verified = {}
+    for r in rows:
+        path = root / r["path"]
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        if sha != r["sha"]:
+            raise ValueError("冻结原图哈希变化")
+        verified[r["path"]] = (path.stat().st_size, path.stat().st_mtime, sha)
     partitions = {s: [r for r in rows if r["split"] == s] for s in ("train", "val", "test", "eval")}
     targets = [sum(r["label"] == label for r in partitions["train"]) for label in ("other", "self")]
     loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([sum(targets) / (2 * n) if n else 0.0 for n in targets], device=device))
@@ -180,20 +213,27 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     history, coverage = [], []
     best, optimizer = None, None
     peak_rss = 0
-    from .store import atomic_json, digest
+    from .store import Store, atomic_json, digest
 
+    store = Store(root)
     checkpoint = job_dir / "resume.pt"
     resume = None
     elapsed = 0.0
     if checkpoint.exists():
-        metadata = __import__("json").loads((job_dir / "resume-audit.json").read_text("utf-8"))
-        if (
-            metadata["snapshot_sha"] != digest(snapshot)
-            or metadata["sha"] != hashlib.sha256(checkpoint.read_bytes()).hexdigest()
-        ):
+        # 完整性基准取自数据库（catalog.sqlite3），与 resume.pt 分处两个文件。
+        # 0.6.0 及以前读的是同目录的 resume-audit.json —— 同一个 worker 紧跟在
+        # torch.save 之后写它，同目录同写者，伪造一对文件即可通过校验。
+        # 快照一致性由 worker.train_job 对着 jobs.snapshot_sha 校验（那里 job 行
+        # 一定存在），这里不再重复，也不要求调用方先把 job 行建好。
+        expected_sha = store.checkpoint_sha(snapshot["job_id"])
+        if expected_sha is None:
+            raise ValueError("断点缺少服务端哈希基准，拒绝恢复")
+        if expected_sha != hashlib.sha256(checkpoint.read_bytes()).hexdigest():
             raise ValueError("checkpoint integrity mismatch")
-        # Only this worker writes checkpoints; user uploads never become pickle inputs.
-        resume = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        # weights_only=True：断点字典里只有 state_dict / RNG state / 标量 / list，
+        # 全部在安全加载白名单内。weights_only=False 会让 torch.load 走 pickle，
+        # 一个被篡改的 .pth 就是任意代码执行。
+        resume = torch.load(checkpoint, map_location="cpu", weights_only=True)
         model.load_state_dict(resume["model"])
         initial, history, coverage, best = resume["initial"], resume["history"], resume["coverage"], resume["best"]
         generator.set_state(resume["generator"])
@@ -224,7 +264,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
                     if isinstance(value, torch.Tensor):
                         state[key] = value.to(device)
             random.setstate(resume["random"])
-            np.random.set_state(resume["numpy"])
+            np.random.set_state(_load_numpy_state(resume["numpy"]))
             torch.set_rng_state(resume["torch"])
             if device == "cuda":
                 torch.cuda.set_rng_state_all(resume["cuda"])
@@ -253,7 +293,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
                 "loss": total_loss,
                 "seen": seen,
                 "random": random.getstate(),
-                "numpy": np.random.get_state(),
+                "numpy": _dump_numpy_state(np.random.get_state()),
                 "torch": torch.get_rng_state(),
                 "cuda": torch.cuda.get_rng_state_all() if device == "cuda" else [],
                 "seconds": elapsed + time.monotonic() - started,
@@ -262,9 +302,11 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
             temporary = checkpoint.with_suffix(".tmp")
             torch.save(state, temporary)
             temporary.replace(checkpoint)
-            atomic_json(
-                job_dir / "resume-audit.json",
-                {"snapshot_sha": digest(snapshot), "sha": hashlib.sha256(checkpoint.read_bytes()).hexdigest()},
+            # 断点哈希写进数据库（catalog.sqlite3），不写 resume.pt 同目录的文件：
+            # 同目录同写者的「自指校验」挡不住能写盘的人，分处两个文件才有意义。
+            # 0.6.1 起 resume-audit.json 不再生成；旧文件留无害，读取侧已不依赖它。
+            store.set_checkpoint_sha(
+                snapshot["job_id"], hashlib.sha256(checkpoint.read_bytes()).hexdigest()
             )
             raise TrainingPaused()
 
@@ -372,7 +414,25 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     for key in ("id", "sha", "decoded"):
         sets = [{r[key] for r in partitions[s]} for s in partitions]
         isolation = isolation and all(not sets[i] & sets[j] for i in range(span) for j in range(i))
-    hashes = all(hashlib.sha256((root / r["path"]).read_bytes()).hexdigest() == r["sha"] for r in rows)
+    # 训练后审计：确认训练期间原图没被换掉。语义与训练前那遍完全相同，但不再
+    # 重读整个图库 —— 先用 (size, mtime) 比对，只有元数据变了才重算 sha。
+    # 实测 400 文件 / 98 MiB：单遍全算 0.15s，而真实图库按 GB 计、冷缓存下是
+    # 分钟级，这一遍原本每个训练任务尾部都要白付一次。
+    hashes = True
+    for r in rows:
+        path = root / r["path"]
+        try:
+            stat = path.stat()
+            current = (stat.st_size, stat.st_mtime)
+        except OSError:
+            hashes = False
+            break
+        cached = verified.get(r["path"])
+        if cached is not None and cached[:2] == current:
+            continue  # 大小与修改时间都没变，内容不可能变
+        if hashlib.sha256(path.read_bytes()).hexdigest() != r["sha"]:
+            hashes = False
+            break
     selection_threshold = selection["threshold"]
     recomputed = (
         metrics([int(r["label"] == "self") for r in test_predictions], [r["score"] for r in test_predictions], selection_threshold) == test

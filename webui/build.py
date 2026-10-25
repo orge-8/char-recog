@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 
 
-PAGES = ("images", "training", "models", "test", "environment")
+PAGES = ("images", "capture", "training", "models", "test", "environment")
 
 
 def build() -> None:

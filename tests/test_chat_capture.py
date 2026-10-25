@@ -28,7 +28,7 @@ def add(store, seed, label=None, source="", score=None):
     pixels = np.random.default_rng(seed).integers(0, 256, (96, 120, 3), dtype=np.uint8)
     path = store.root / "uploads" / f"{seed}-{time.time_ns()}.png"
     Image.fromarray(pixels).save(path)
-    return store.ingest(path, label, CHAR, "", "", "", source, score)
+    return store.ingest(path, label, CHAR, source, score)
 
 
 def test_band_picks_the_highest_hesitant_score():
@@ -62,7 +62,7 @@ def test_captured_image_is_stored_unlabelled_with_its_score(tmp_path):
     assert row["model_score"] == pytest.approx(0.71)
 
 
-def test_pending_counter_only_counts_unlabelled_chat_rows(tmp_path):
+def test_pending_counter_only_counts_reviewable_chat_groups(tmp_path):
     store = Store(tmp_path)
     add(store, 1, source="chat", score=0.7)
     add(store, 2, source="chat", score=0.6)

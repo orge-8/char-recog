@@ -40,6 +40,22 @@
 .report-delta .up{color:var(--good);font-weight:600}
 .report-delta .down{color:var(--danger);font-weight:600}
 @media(max-width:1000px){.report-compare{grid-template-columns:1fr}}
+/* 0.5.22 待确认队列：一次只问一组，减少误点和疲劳 */
+.capture-card{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:20px;padding:16px}
+.capture-media{background:var(--soft);border-radius:var(--maibot-radius);min-height:380px;display:grid;place-items:center;padding:10px}
+.capture-media img{max-width:100%;max-height:64vh;object-fit:contain}
+.capture-meta{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.capture-actions{display:grid;gap:8px;margin-top:16px}
+.capture-actions .row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.capture-actions .row.two{grid-template-columns:minmax(0,1fr) minmax(0,1.4fr)}
+.capture-actions button{padding:9px 8px;font-size:12px;white-space:normal}
+.capture-actions select{padding:9px 8px;font-size:12px}
+.capture-strip{display:flex;gap:8px;overflow:auto;padding:2px 2px 12px;margin-top:16px}
+.capture-thumb{flex:0 0 66px;height:66px;padding:2px;border:2px solid transparent;border-radius:var(--maibot-radius);background:var(--soft);cursor:pointer}
+.capture-thumb img{width:100%;height:100%;object-fit:cover;border-radius:calc(var(--maibot-radius) - 3px)}
+.capture-thumb.active{border-color:var(--accent)}
+.capture-thumb.skipped{opacity:.35}
+@media(max-width:900px){.capture-card{grid-template-columns:1fr}.capture-media{min-height:240px}}
 </style>
 </head>
 <body class="maibot-page">
@@ -54,17 +70,25 @@
   <section class="section" id="images" role="region" aria-label="图片标注" hidden>
     <div class="intro row between"><button class="maibot-button maibot-button-primary" data-open-upload="library">＋ 上传图片</button></div>
     <div class="stats"><div class="stat maibot-card"><p class="label" id="self-label">是 Bot · 可训练图组</p><div class="number" id="self-count">—</div></div><div class="stat maibot-card"><p class="label" id="other-label">不是 Bot · 可训练图组</p><div class="number" id="other-count">—</div></div><div class="stat maibot-card"><p class="label">当前筛选图片</p><div class="number" id="image-count">—</div><p class="foot" id="image-source">每页最多 24 张</p></div></div>
-    <div class="toolbar"><div class="filters"><label for="image-filter">查看范围</label><select class="maibot-select" id="image-filter"><option value="all">全部图片</option><option value="eligible">可训练</option><option value="excluded">已排除</option><option value="unlabelled">未标注</option><option value="untyped">未标注类型</option><option value="errors">指定任务错判</option><option value="removed">已删除 · 可恢复</option></select><label for="style-filter">内容类型</label><select class="maibot-select" id="style-filter"><option value="">全部</option><option value="flat">平涂/Q版</option><option value="paint">厚涂插画</option><option value="photo">实拍</option></select><label for="text-filter">文字</label><select class="maibot-select" id="text-filter"><option value="">全部</option><option value="yes">有文字</option><option value="no">无文字</option></select><button class="maibot-button small" id="return-library" hidden>返回图片库</button></div><div class="row"><button class="maibot-button small" id="select-page">全选本页</button><button class="maibot-button small" id="unselect-page">取消本页</button><button class="maibot-button small maibot-button-danger" data-action="remove_all">删除全部</button></div></div>
-    <div id="selection-bar" class="selected-bar" hidden><span>已选择 <b id="selection-count">0</b> 张 <small>· 保留其他页的选择</small></span><div class="row"><button class="maibot-button small" data-batch="batch_positive">标为是 Bot</button><button class="maibot-button small" data-batch="batch_negative">标为不是 Bot</button><button class="maibot-button small maibot-button-danger" data-batch="batch_remove">删除选中</button><select id="batch-style" class="maibot-select" style="width:auto" aria-label="批量设置内容类型"><option value="">类型…</option><option value="flat">平涂/Q版</option><option value="paint">厚涂插画</option><option value="photo">实拍</option><option value="clear">清除类型</option></select><button class="maibot-button small" data-batch="batch_style">应用类型</button><select id="batch-text" class="maibot-select" style="width:auto" aria-label="批量设置文字叠加"><option value="">文字…</option><option value="yes">有文字</option><option value="no">无文字</option><option value="clear">清除文字标记</option></select><button class="maibot-button small" data-batch="batch_text">应用文字</button><select id="batch-neg" class="maibot-select" style="width:auto" aria-label="批量设置负例类型"><option value="">负例…</option><option value="other_character">其他角色</option><option value="non_character">非角色内容</option><option value="clear">清除负例</option></select><button class="maibot-button small" data-batch="batch_neg">应用负例</button><button class="maibot-button small" id="clear-selection">清空选择</button></div></div>
+    <div class="toolbar"><div class="filters"><label for="image-filter">查看范围</label><select class="maibot-select" id="image-filter"><option value="all">全部图片</option><option value="eligible">可训练</option><option value="excluded">已排除</option><option value="unlabelled">未标注</option><option value="errors">指定任务错判</option><option value="removed">已删除 · 可恢复</option></select><button class="maibot-button small" id="return-library" hidden>返回图片库</button></div><div class="row"><button class="maibot-button small" id="select-page">全选本页</button><button class="maibot-button small" id="unselect-page">取消本页</button><button class="maibot-button small maibot-button-danger" data-action="remove_all">删除全部</button></div></div>
+    <div id="selection-bar" class="selected-bar" hidden><span>已选择 <b id="selection-count">0</b> 张 <small>· 保留其他页的选择</small></span><div class="row"><button class="maibot-button small" data-batch="batch_positive">标为是 Bot</button><button class="maibot-button small" data-batch="batch_negative">标为不是 Bot</button><button class="maibot-button small maibot-button-danger" data-batch="batch_remove">删除选中</button><button class="maibot-button small" id="clear-selection">清空选择</button></div></div>
     <div id="image-grid" class="gallery"><div class="empty maibot-card">正在读取图片库…</div></div>
     <div class="pagination"><p class="muted" id="page-summary">—</p><div class="row"><button class="maibot-button" id="previous-page">上一页</button><button class="maibot-button" id="next-page">下一页</button><span class="page-jump"><label class="muted" for="page-jump">跳至</label><input class="maibot-input" id="page-jump" type="number" min="1" value="1" aria-label="页码"><button class="maibot-button small" id="jump-page">跳转</button></span></div></div>
   </section>
+  <section class="section" id="capture" role="region" aria-label="待确认" hidden>
+    <div class="stats"><div class="stat maibot-card"><p class="label">待确认图组</p><div class="number" id="capture-count">—</div><p class="foot" id="capture-cap">每页最多 24 组</p></div><div class="stat maibot-card"><p class="label">本组捕获得分</p><div class="number" id="capture-score">—</div><p class="foot">模型当时的犹豫分，不是真值</p></div><div class="stat maibot-card"><p class="label">已自动处理</p><div class="number" id="capture-auto">—</div><p class="foot">旧数据 · 可一次性清理</p></div></div>
+    <div class="toolbar"><div class="filters"><label for="capture-character">角色范围</label><select class="maibot-select" id="capture-character"><option value="">全部角色</option></select></div></div>
+    <div id="capture-panel"><div class="empty maibot-card"><strong>正在读取待确认队列</strong>请稍候…</div></div>
+    <div class="pagination"><p class="muted" id="capture-summary">—</p><div class="row"><button class="maibot-button" id="capture-prev">上一页</button><button class="maibot-button" id="capture-next">下一页</button></div></div>
+    <details class="technical" id="capture-auto-box" hidden><summary>已自动处理 <span id="capture-auto-count">0</span> 张</summary><p class="hint">纯色、同组已有可用成员、跨划分冲突的图片不会进入队列。入库闸门生效后，这里基本只剩旧数据。</p><button class="maibot-button small maibot-button-danger" data-capture-cleanup>清理这些旧数据</button></details>
+    <p class="hint">快捷键：1 = 是；2 = 不是；空格 = 跳过本组；U = 撤销上一步。</p>
+  </section>
   <section class="section" id="training" role="region" aria-label="训练任务" hidden>
     <div class="split"><aside class="card maibot-card"><div class="panel-title"><h3>新训练任务</h3><p class="hint">训练数据会在开始时冻结为快照。</p></div><div id="readiness" class="readiness maibot-inset">正在检查数据…</div><div class="field"><label>训练模式</label><div class="segmented" id="mode-buttons"><button aria-pressed="true" class="maibot-button" data-mode="incremental">增量训练</button><button class="maibot-button" data-mode="fresh">从头训练</button></div><p class="hint">增量继承当前模型；仅训练新增或标签已修改的图片。</p></div><div class="field"><label>训练设备</label><div class="segmented" id="device-buttons"><button aria-pressed="true" class="maibot-button" data-device="cpu">CPU</button><button class="maibot-button" data-device="cuda">CUDA</button></div><p id="training-reason" class="hint">正在检查运行环境…</p></div><div class="field"><label for="input-size">输入尺寸</label><select id="input-size" class="maibot-select"><option value="224">224×224</option><option value="320" selected>320×320</option><option value="448">448×448</option></select></div><button id="start-training" disabled class="maibot-button full maibot-button-primary" data-action="submit">开始训练</button>
-      <div id="training-blockers"></div><button id="rebuild-eval" class="maibot-button full" style="margin-top:10px">重建评估集</button><p class="hint">评估集是分类型报告的依据。重建后用当前已标注类型的图片重新挑选，历史报告不再可比。</p><p class="hint">每次运行一个任务，中断后可手动重试。</p></aside><div><div class="card maibot-card"><div class="card-head"><div><h3>任务记录</h3><p>运行期间每 5 秒更新状态</p></div><span class="badge maibot-badge" id="job-count">—</span></div><div id="job-list">正在读取任务…</div></div><div class="card report maibot-card"><div class="card-head"><div><h3>评测报告</h3></div><select class="maibot-select" id="report-select" aria-label="选择任务报告"><option value="">选择已完成任务</option></select><select class="maibot-select" id="report-compare-select" aria-label="选择对比任务"><option value="">不对比</option></select></div><div id="report-content" class="muted">尚未选择报告。</div></div></div></div>
+      <div id="training-blockers"></div><button id="rebuild-eval" class="maibot-button full" style="margin-top:10px">重建评估集</button><p class="hint">评估集是「跨版本可比」的依据：它不参与训练，每次报告都用同一批图算指标。重建会用当前训练库重新挑选，历史报告不再可比。</p><p class="hint">每次运行一个任务，中断后可手动重试。</p></aside><div><div class="card maibot-card"><div class="card-head"><div><h3>任务记录</h3><p>运行期间每 5 秒更新状态</p></div><span class="badge maibot-badge" id="job-count">—</span></div><div class="filters" style="margin-bottom:14px"><label for="job-scope">角色</label><select class="maibot-select" id="job-scope"><option value="current">只看当前角色</option><option value="all">全部角色</option></select><label for="job-state">状态</label><select class="maibot-select" id="job-state"><option value="all">全部状态</option><option value="complete">已完成</option><option value="failed">失败或中断</option><option value="cancelled">已取消</option><option value="paused">已暂停</option></select></div><div class="selected-bar" id="job-selection-bar" hidden><span id="job-selection-text">已选 0 条</span><div class="row"><button class="maibot-button" id="job-clear-selection">清除选择</button><button class="maibot-button maibot-button-danger" id="job-delete-selected">删除所选</button></div></div><div id="job-list">正在读取任务…</div><div class="row between" id="job-more" style="margin-top:14px" hidden><span class="hint" id="job-more-text"></span><button class="maibot-button" id="job-toggle"></button></div></div><div class="card report maibot-card"><div class="card-head"><div><h3>评测报告</h3></div><select class="maibot-select" id="report-select" aria-label="选择任务报告"><option value="">选择已完成任务</option></select><select class="maibot-select" id="report-compare-select" aria-label="选择对比任务"><option value="">不对比</option></select></div><div id="report-content" class="muted">尚未选择报告。</div></div></div></div>
   </section>
   <section class="section" id="models" role="region" aria-label="模型版本" hidden>
-    <div class="intro row between"><button class="maibot-button" id="rollback" disabled data-action="rollback">回退上一版本</button></div><p id="rollback-text" class="notice">正在读取版本信息…</p><p id="threshold-note" class="hint"></p><div id="version-list" class="versions"></div>
+    <div class="intro row between"><button class="maibot-button" id="rollback" disabled data-action="rollback">回退上一版本</button></div><p id="rollback-text" class="notice">正在读取版本信息…</p><p id="threshold-note" class="hint"></p><div class="selected-bar" id="version-selection-bar" hidden><span id="version-selection-text">已选 0 个版本</span><div class="row"><button class="maibot-button" id="version-clear-selection">清除选择</button><button class="maibot-button maibot-button-danger" id="version-delete-selected">删除所选</button></div></div><div id="version-list" class="versions"></div>
   </section>
   <section class="section" id="test" role="region" aria-label="识别测试">
     <div class="intro row between"><button class="maibot-button maibot-button-primary" data-open-upload="recognition">＋ 选择测试图片</button></div><div id="test-results" class="gallery"></div>
@@ -76,8 +100,9 @@
   </section>
   <footer class="footer"><span></span><span id="updated-at">等待首次加载</span></footer>
 </main>
-<dialog class="maibot-card" id="environment-dialog" aria-labelledby="environment-title"><div class="dialog-head"><h2 id="environment-title">选择自定义环境</h2><button class="maibot-button" id="close-environment" aria-label="关闭">✕</button></div><div class="dialog-body"><label for="custom-python">已有 Python 解释器或环境目录的绝对路径</label><input class="maibot-input full" id="custom-python" type="text" placeholder="Python 解释器的完整路径"></div><div class="dialog-foot"><button class="maibot-button" id="apply-environment">切换环境</button></div></dialog>
-<dialog class="maibot-card" id="upload-dialog" aria-labelledby="upload-title"><div class="dialog-head"><div><h2 id="upload-title">上传标注图片</h2><p class="hint" id="upload-description"></p></div><button class="maibot-button" id="close-upload" aria-label="关闭上传窗口">✕</button></div><div class="dialog-body"><div id="upload-identity" class="field" style="margin-top:0"><label>本批图片身份</label><div class="segmented"><button aria-pressed="true" data-upload-label="self" class="maibot-button">是 Bot</button><button class="maibot-button" data-upload-label="other">不是 Bot</button></div></div><div class="field"><label for="upload-style">本批内容类型</label><select id="upload-style" class="maibot-select"><option value="">未标注</option><option value="flat">平涂/Q版</option><option value="paint">厚涂插画</option><option value="photo">实拍</option></select><p class="hint">按批标注即可 —— 一次上传通常就是同一种类型。类型用来在报告里分档看召回。</p></div><div class="field"><label for="upload-has-text">这些图有没有明显文字</label><select id="upload-has-text" class="maibot-select"><option value="">未标注</option><option value="yes">有文字/贴纸叠加</option><option value="no">没有</option></select><p class="hint">文字叠加和画法无关：梗图、贴纸、海报都可能带字，所以单独记。</p></div><div class="field" id="upload-neg-field" hidden><label for="upload-neg-type">这些图是什么</label><select id="upload-neg-type" class="maibot-select"><option value="">未标注</option><option value="other_character">其他角色</option><option value="non_character">非角色内容</option></select><p class="hint">只问「图里是谁」：是别的角色，还是根本不是角色。表情包、梗图这类形态不属于这里 —— 上面的内容类型选「图文/梗图」即可。</p></div><div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="选择或拖入图片"><h3>点击选择图片，或拖到这里</h3><p>JPEG / PNG / 静态 WebP · 长边自动限制到 4000 像素</p></div><input class="maibot-input" id="upload-input" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden><div id="upload-total" class="upload-total" hidden><progress max="100" value="0" aria-label="上传总进度"></progress><p class="hint" id="upload-total-text"></p></div><div id="upload-list" class="upload-list"></div></div><div class="dialog-foot"><p class="hint" id="upload-summary" style="margin:0">尚未选择图片</p><div class="row"><button class="maibot-button" id="cancel-upload" hidden>取消上传</button><button class="maibot-button" id="retry-upload" hidden>重试失败文件</button><button id="start-upload" class="maibot-button maibot-button-primary" disabled>开始上传</button></div></div><p class="hint" style="padding:0 24px 18px;margin:0">关闭窗口会取消未完成请求；已接收文件保留。重试标注图片时，重复文件会复用已有记录。</p></dialog>
+<dialog class="maibot-card" id="environment-dialog" aria-labelledby="environment-title"><div class="dialog-head"><h2 id="environment-title">选择自定义环境</h2><button class="maibot-button" id="close-environment" aria-label="关闭">✕</button></div><div class="dialog-body"><label for="custom-python">插件数据目录内的 Python 解释器（dependencies/ 或 venv*）</label><input class="maibot-input full" id="custom-python" type="text" placeholder="例如 .../char-recog/dependencies/Scripts/python.exe"></div><div class="dialog-foot"><button class="maibot-button" id="apply-environment">切换环境</button></div></dialog>
+<dialog class="maibot-card" id="upload-dialog" aria-labelledby="upload-title"><div class="dialog-head"><div><h2 id="upload-title">上传标注图片</h2><p class="hint" id="upload-description"></p></div><button class="maibot-button" id="close-upload" aria-label="关闭上传窗口">✕</button></div><div class="dialog-body"><div id="upload-identity" class="field" style="margin-top:0"><label>本批图片身份</label><div class="segmented"><button aria-pressed="true" data-upload-label="self" class="maibot-button">是 Bot</button><button class="maibot-button" data-upload-label="other">不是 Bot</button></div></div><div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="选择或拖入图片"><h3>点击选择图片，或拖到这里</h3><p>JPEG / PNG / 静态 WebP · 长边自动限制到 4000 像素</p></div><input class="maibot-input" id="upload-input" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden><div id="upload-total" class="upload-total" hidden><progress max="100" value="0" aria-label="上传总进度"></progress><p class="hint" id="upload-total-text"></p></div><div id="upload-list" class="upload-list"></div></div><div class="dialog-foot"><p class="hint" id="upload-summary" style="margin:0">尚未选择图片</p><div class="row"><button class="maibot-button" id="cancel-upload" hidden>取消上传</button><button class="maibot-button" id="retry-upload" hidden>重试失败文件</button><button id="start-upload" class="maibot-button maibot-button-primary" disabled>开始上传</button></div></div><p class="hint" style="padding:0 24px 18px;margin:0">关闭窗口会取消未完成请求；已接收文件保留。重试标注图片时，重复文件会复用已有记录。</p></dialog>
+<dialog class="maibot-card" id="confirm-dialog" aria-labelledby="confirm-title"><div class="dialog-head"><h2 id="confirm-title"></h2><button class="maibot-button" id="close-confirm" aria-label="关闭">✕</button></div><div class="dialog-body"><p class="hint" id="confirm-text" style="white-space:pre-line"></p></div><div class="dialog-foot"><p class="hint" style="margin:0">确认后无法撤销。</p><div class="row"><button class="maibot-button" id="confirm-cancel">取消</button><button class="maibot-button" id="confirm-ok">确认</button></div></div></dialog>
 <script type="module">
 const $ = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -85,15 +110,79 @@ const thumbnail = value => typeof value === 'string' && value.length <= 24000 &&
 const badge = (text, kind = '') => `<span class="badge ${kind} maibot-badge">${escape(text)}</span>`;
 const empty = (title, note) => `<div class="empty maibot-card"><strong>${escape(title)}</strong>${escape(note)}</div>`;
 const button = (label, attrs = '', disabled = false, kind = '') => `<button class="maibot-button small ${kind ? `maibot-button-${kind}` : ''}" ${attrs} ${disabled ? 'disabled' : ''}>${escape(label)}</button>`;
-const data = { characters:null, pictures:null, form:null, jobs:null, report:null, versions:null, results:null, env:null };
+function formatSize(value) {
+  const bytes = Number(value) || 0;
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+const data = { characters:null, pictures:null, captureQueue:null, form:null, jobs:null, report:null, versions:null, results:null, env:null };
 const selected = new Set();
+// Sidebar pages are separate documents inside a sandboxed iframe (opaque origin),
+// so localStorage throws. Choices live in the plugin DB and come back via `ui`.
+const pick = (value, allowed, fallback) => allowed.includes(value) ? value : fallback;
 // build.py specializes this shared source for each sidebar entry.
 const HOME_PAGE = 'test';
-const PAGE_TITLES = {images:'图片标注',training:'训练任务',models:'模型版本',test:'识别测试',environment:'运行环境'};
-let tab = HOME_PAGE, page = 1, filter = 'all', styleFilter = '', textFilter = '', errorJob = '', reportJob = '', compareJob = '', mode = 'incremental', device = 'cpu', inputSize = null, deviceChosen = false;
-let busy = false, loading = false, loadAgain = false, generation = 0, lastUpdate = '', picturesLoading = false, noticeTimer = 0;
-let uploadKind = 'library', uploadLabel = 'self', uploadStyle = '', uploadNegType = '', uploadHasText = '', uploadRows = [], uploadRunning = false, uploadController = null, retryArgs = null;
+const PAGE_TITLES = {images:'图片标注',capture:'待确认',training:'训练任务',models:'模型版本',test:'识别测试',environment:'运行环境'};
+let tab = HOME_PAGE, page = 1,
+  filter = 'all',
+  errorJob = '', reportJob = '', compareJob = '',
+  mode = 'incremental', device = 'cpu', inputSize = null, deviceChosen = false;
+let busy = false, loading = false, loadAgain = false, loadAgainSilent = false, generation = 0, lastUpdate = '', picturesLoading = false, noticeTimer = 0;
+let uploadKind = 'library', uploadLabel = 'self', uploadRows = [], uploadRunning = false, uploadController = null, retryArgs = null;
+let capturePage = 1, captureFocus = 0, captureUndo = null;
+let captureCharacter = '';
+const captureSkipped = new Set();
 let character = '';
+// Job history is scoped by default: the training page already speaks for one
+// character, and a mixed list is what made older tasks hard to find.
+const JOB_PAGE_SIZE = 5;
+const jobSelected = new Set();
+const versionSelected = new Set();
+let jobScope = 'current', jobState = 'all', jobExpanded = false;
+let uiSaving = false, uiPending = false;
+
+function uiPayload() {
+  return { character, filter, mode, device, input_size:inputSize, device_chosen:deviceChosen, capture_character:captureCharacter, job_scope:jobScope, job_state:jobState };
+}
+// One request at a time; changes made while it is in flight collapse into one follow-up.
+function saveUi() {
+  uiPending = true;
+  if (uiSaving) return;
+  uiSaving = true;
+  void (async () => {
+    while (uiPending) {
+      uiPending = false;
+      try { await maibot.action('ui_save', { state: JSON.stringify(uiPayload()) }); } catch {}
+    }
+    uiSaving = false;
+  })();
+}
+function syncUiControls() {
+  $('image-filter').value = filter;
+  for (const item of document.querySelectorAll('[data-mode]')) item.setAttribute('aria-pressed', String(item.dataset.mode === mode));
+  for (const item of document.querySelectorAll('[data-device]')) item.setAttribute('aria-pressed', String(item.dataset.device === device));
+  if (inputSize !== null) $('input-size').value = String(inputSize);
+  const capture = $('capture-character');
+  if ([...capture.options].some(option => option.value === captureCharacter)) capture.value = captureCharacter;
+  $('job-scope').value = jobScope;
+  $('job-state').value = jobState;
+  const select = $('character-select');
+  if ([...select.options].some(option => option.value === character)) select.value = character;
+}
+function applyUi(state = {}) {
+  character = typeof state.character === 'string' ? state.character : '';
+  filter = pick(state.filter, ['all','eligible','excluded','unlabelled','errors','removed'], 'all');
+  mode = pick(state.mode, ['incremental','fresh'], 'incremental');
+  device = pick(state.device, ['cpu','cuda'], 'cpu');
+  inputSize = pick(state.input_size, [null,224,320,448], null);
+  deviceChosen = state.device_chosen === true;
+  captureCharacter = typeof state.capture_character === 'string' ? state.capture_character : '';
+  jobScope = pick(state.job_scope, ['current','all'], 'current');
+  jobState = pick(state.job_state, ['all','complete','failed','cancelled','paused'], 'all');
+  syncUiControls();
+}
 
 function notice(message, kind = '') {
   $('notice').hidden = !message;
@@ -107,7 +196,7 @@ function rows(result, name) {
   return result.rows;
 }
 function showSection(next) {
-  if (!['images','training','models','test','environment'].includes(next)) return;
+  if (!['images','capture','training','models','test','environment'].includes(next)) return;
   tab = next; generation++;
   $('return-page').hidden = next === HOME_PAGE;
   $('return-page').textContent = `← 返回${PAGE_TITLES[HOME_PAGE]}`;
@@ -118,9 +207,12 @@ function showSection(next) {
 function renderCharacters() {
   const list = data.characters?.rows ?? [];
   if (!list.length) return;
-  if (!list.includes(character)) character = list[0];
+  if (!list.includes(character)) { character = list[0]; saveUi(); }
   $('character-select').innerHTML = list.map(name => `<option value="${escape(name)}"${name === character ? ' selected' : ''}>${escape(name)}</option>`).join('');
   $('character-select').value = character;
+  if (captureCharacter && !list.includes(captureCharacter)) { captureCharacter = ''; saveUi(); }
+  $('capture-character').innerHTML = '<option value="">全部角色</option>' + list.map(name => `<option value="${escape(name)}"${name === captureCharacter ? ' selected' : ''}>${escape(name)}</option>`).join('');
+  $('capture-character').value = captureCharacter;
   const self = `是${character}`, other = `不是${character}`;
   $('self-label').textContent = `${self} · 可训练图组`;
   $('other-label').textContent = `${other} · 可训练图组`;
@@ -152,41 +244,55 @@ async function query(alias, args = {}) {
 }
 // Coalesce rapid filters/tab changes into at most one follow-up refresh. No growing request queue.
 async function load(silent = false) {
-  if (loading || busy || uploadRunning) { loadAgain = true; return; }
+  if (loading || busy || uploadRunning) {
+    if (!loadAgain) loadAgainSilent = silent;
+    else loadAgainSilent = loadAgainSilent && silent;
+    loadAgain = true;
+    return;
+  }
   if (document.hidden) return;
   loading = true; const current = tab, version = generation;
-  $('refresh').disabled = true; $('refresh').textContent = '更新中…';
+  let changed = !silent;
+  const track = (key, value) => {
+    if (JSON.stringify(data[key]) === JSON.stringify(value)) return;
+    data[key] = value; changed = true;
+  };
+  if (!silent) { $('refresh').disabled = true; $('refresh').textContent = '更新中…'; }
   try {
-    if (!data.env || current === 'environment' || current === 'training') data.env = await query('env');
+    if (!data.env || current === 'environment' || current === 'training') track('env', await query('env'));
     if (!data.characters) { const value = await query('characters'); rows(value,'角色名单'); data.characters = value; renderCharacters(); }
-    if (!data.versions || current === 'models') { const value = await query('versions', { character }); rows(value,'模型版本'); data.versions = value; }
-    if (current === 'images' || current === 'training') data.form = await query('form', { character });
+    if (!data.versions || current === 'models') { const value = await query('versions', { character }); rows(value,'模型版本'); track('versions', value); }
+    if (current === 'images' || current === 'training') track('form', await query('form', { character }));
     if (current === 'images') {
       const value = await query('pictures', {
         page, view: filter, character,
-        ...(styleFilter ? { style: styleFilter } : {}),
-        ...(textFilter ? { has_text: textFilter } : {}),
         ...(filter === 'errors' && errorJob ? { job_id:errorJob } : {}),
       });
       rows(value,'图片库');
-      if (version === generation) { data.pictures = value; page = value.pagination.page; picturesLoading = false; }
+      if (version === generation) { track('pictures', value); page = value.pagination.page; picturesLoading = false; }
+    } else if (current === 'capture') {
+      const value = await query('pictures', { page:capturePage, view:'captured', ...(captureCharacter ? { character:captureCharacter } : {}) });
+      rows(value,'待确认队列');
+      if (version === generation) { track('captureQueue', value); capturePage = value.pagination.page; }
     } else if (current === 'training') {
-      const value = await query('jobs'); rows(value,'训练任务'); data.jobs = value;
-      if (reportJob) { const job = reportJob; const value = await query('report', { job_id:job }); if (job === reportJob) data.report = value; }
-      if (compareJob) { const job = compareJob; const value = await query('report', { job_id:job }); if (job === compareJob) data.compareReport = value; }
-    } else if (current === 'test') { const value = await query('results'); rows(value,'识别结果'); data.results = value; }
+      const value = await query('jobs'); rows(value,'训练任务'); track('jobs', value);
+      if (reportJob) { const job = reportJob; const value = await query('report', { job_id:job }); if (job === reportJob) track('report', value); }
+      if (compareJob) { const job = compareJob; const value = await query('report', { job_id:job }); if (job === compareJob) track('compareReport', value); }
+    } else if (current === 'test') { const value = await query('results'); rows(value,'识别结果'); track('results', value); }
     lastUpdate = new Date().toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    if (version === generation) render();
+    if (version === generation && changed) render();
     updateHeader();
-  } catch (error) { notice(error.message, 'error'); picturesLoading = false; if (tab === 'images') renderImages(); }
+  } catch (error) { notice(error.message, 'error'); picturesLoading = false; if (tab === 'images') renderImages(); if (tab === 'capture') renderCapture(); }
   finally {
-    loading = false; $('refresh').disabled = false; $('refresh').textContent = '刷新';
-    if (loadAgain) { loadAgain = false; void load(silent); }
+    loading = false;
+    if (!silent) { $('refresh').disabled = false; $('refresh').textContent = '刷新'; }
+    if (loadAgain) { const again = loadAgainSilent; loadAgain = false; loadAgainSilent = false; void load(again); }
   }
 }
 function render() {
   updateHeader();
   if (tab === 'images') renderImages();
+  if (tab === 'capture') renderCapture();
   if (tab === 'training') renderTraining();
   if (tab === 'models') renderModels();
   if (tab === 'test') renderTests();
@@ -202,8 +308,6 @@ function updateSelection() {
 }
 function renderImages() {
   $('image-filter').value = filter;
-  $('style-filter').value = styleFilter;
-  $('text-filter').value = textFilter;
   $('return-library').hidden = filter !== 'errors';
   if (!data.pictures) {
     $('image-grid').className = '';
@@ -226,6 +330,95 @@ function renderImages() {
   $('jump-page').disabled = picturesLoading || data.pictures.pages <= 1;
   updateSelection();
 }
+function captureList() { return data.captureQueue?.rows ?? []; }
+function captureNextIndex(list, from) {
+  for (let step = 1; step <= list.length; step++) {
+    const index = (from + step) % list.length;
+    if (!captureSkipped.has(list[index].id)) return index;
+  }
+  return from;
+}
+function captureCurrent() {
+  const list = captureList();
+  if (!list.length) return null;
+  let row = list[captureFocus];
+  if (!row || captureSkipped.has(row.id)) {
+    captureFocus = captureNextIndex(list, captureFocus);
+    row = list[captureFocus];
+  }
+  return row && !captureSkipped.has(row.id) ? row : null;
+}
+function captureStrip(list, currentId) {
+  return list.map((row, index) => `<button class="capture-thumb ${row.id === currentId ? 'active' : ''} ${captureSkipped.has(row.id) ? 'skipped' : ''}" data-capture-focus="${index}" title="${escape(row.character)} · 第 ${index + 1} 组 · 得分 ${Number(row.model_score ?? 0).toFixed(3)}"><img src="${thumbnail(row.thumbnail)}" alt="${escape(row.character)} 第 ${index + 1} 组预览" loading="lazy"></button>`).join('');
+}
+function renderCapture() {
+  const value = data.captureQueue, capture = value?.capture ?? {}, list = captureList();
+  $('capture-count').textContent = capture.pending_groups ?? '—';
+  $('capture-cap').textContent = `${captureCharacter || '全部角色'} · 每个角色上限 ${capture.limit ?? 100} 组 · 每页最多 24 组`;
+  $('capture-auto').textContent = capture.auto_rows ?? '—';
+  $('capture-auto-box').hidden = !(capture.auto_rows > 0);
+  $('capture-auto-count').textContent = capture.auto_rows ?? 0;
+  $('capture-prev').disabled = !value || capturePage <= 1;
+  $('capture-next').disabled = !value || capturePage >= (value.pages ?? 1);
+  $('capture-summary').textContent = value ? `第 ${capturePage} / ${value.pages} 页 · 共 ${value.total} 组` : '—';
+  $('capture-score').textContent = '—';
+  if (!value) { $('capture-panel').innerHTML = empty('正在读取待确认队列','请稍候…'); return; }
+  if (!capture.enabled) {
+    $('capture-panel').innerHTML = empty('聊天捕获已关闭','到插件配置里打开 chat_capture，聊天中模型拿不准的图片才会进入这里。');
+    return;
+  }
+  if (!list.length) {
+    $('capture-panel').innerHTML = capture.pending_groups
+      ? empty('这一页没有待确认的图片','队列还有别的页，试试上一页。')
+      : captureCharacter
+        ? empty('这个角色没有待确认的图片', `「${captureCharacter}」暂时没有待确认的图片，切到全部角色看看。`)
+        : empty('没有待确认的图片','聊天里遇到模型拿不准的图片时，它会出现在这里。每个角色最多保留 100 组待确认。');
+    return;
+  }
+  const row = captureCurrent();
+  if (!row) {
+    $('capture-panel').innerHTML = `<div class="empty maibot-card"><strong>本页的 ${list.length} 组都已跳过</strong><p class="hint" style="margin-top:6px">跳过只影响这次浏览，不会写入数据库。</p><div class="row" style="justify-content:center;margin-top:14px">${button('重看本页','data-capture-reset')}${value.pages > capturePage ? button('下一页','data-capture-next-page') : ''}</div></div><div class="capture-strip">${captureStrip(list, '')}</div>`;
+    return;
+  }
+  const index = list.indexOf(row), score = Number(row.model_score ?? 0).toFixed(3);
+  const who = row.character || captureCharacter || character;
+  $('capture-score').textContent = score;
+  $('capture-panel').innerHTML = `<article class="capture-card maibot-card">
+    <div class="capture-media">${thumbnail(row.thumbnail) ? `<img src="${thumbnail(row.thumbnail)}" alt="待确认图片" decoding="async">` : '<span class="muted">无预览</span>'}</div>
+    <div>
+      <div class="capture-meta"><span>第 ${index + 1} / ${list.length} 组</span>${badge(who,'good')}<span class="mono" title="图组 ${escape(row.group_id)}">#${escape(row.id.slice(0, 12))}</span></div>
+      <p class="hint" style="margin-top:10px">模型捕获得分 <b>${score}</b>。它只是模型犹豫的样本，不是真值；确认后才会写入训练库。</p>
+      <div class="capture-actions">
+        <div class="row two">${button(`1 · 是${who}`,'data-capture-confirm="self"',busy)}${button(`2 · 不是${who}`,'data-capture-confirm="other"',busy)}</div>
+        <div class="row">${button('空格 · 跳过本组','data-capture-skip')}${button('U · 撤销上一步','data-capture-undo',busy || !captureUndo)}${button('彻底删除…','data-capture-purge',busy,'danger')}</div>
+      </div>
+    </div>
+  </article>
+  <div class="capture-strip">${captureStrip(list, row.id)}</div>`;
+}
+async function captureConfirm(label) {
+  const row = captureCurrent();
+  if (!row) return;
+  const who = row.character || captureCharacter || character;
+  const ok = await operate('capture_confirm', { image_id:row.id, character:who, label }, label === 'self' ? `已确认是${who}` : `已确认不是${who}`);
+  if (ok) { captureUndo = { id:row.id, character:who }; captureSkipped.delete(row.id); renderCapture(); }
+}
+function captureSkip() {
+  const list = captureList(), row = captureCurrent();
+  if (!row) return;
+  captureSkipped.add(row.id);
+  captureFocus = captureNextIndex(list, list.indexOf(row));
+  renderCapture();
+}
+async function captureUndoLast() {
+  if (!captureUndo) { notice('没有可撤销的确认', 'error'); return; }
+  const ok = await operate('capture_undo', { image_id:captureUndo.id, character:captureUndo.character }, '已撤销上一步确认');
+  if (ok) { captureUndo = null; renderCapture(); }
+}
+function captureGoPage(next) {
+  capturePage = Math.max(1, next); captureFocus = 0; captureSkipped.clear();
+  data.captureQueue = null; generation++; renderCapture(); void load();
+}
 function renderTraining() {
   if (data.form) {
     if (inputSize === null) inputSize = data.form.input_size ?? 320;
@@ -233,7 +426,7 @@ function renderTraining() {
     const {self,other} = data.form.groups;
     const tier = {insufficient:'样本不足',thin:'样本偏少',usable:'可用',good:'样本充足'}[data.form.level] || '';
     const hint = [data.form.advice, data.form.negative_thin ? '负例偏少：「其他角色」和「非角色内容」都要标一些——只用一类当负例时，模型对另一类几乎不设防（实测缺口 30–40 个百分点）。' : ''].filter(Boolean).map(text => `<p class="hint">${escape(text)}</p>`).join('');
-    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="100" value="${Math.min(Math.min(self,other),100)}" aria-label="训练数据准备程度"></progress>${tier ? `<p class="hint"><b>${tier}</b></p>` : ''}${hint}<p class="hint">待训练 ${data.form.pending_count ?? 0} 张 · 当前判定阈值 ${(data.form.threshold ?? 0.6).toFixed(2)}</p>${data.form.capture_pending ? `<p class="hint">聊天捕获待确认：<b>${data.form.capture_pending}</b> 张（到「未标注」视图里确认或删除）</p>` : ''}${data.form.coverage_text ? `<p class="hint">内容类型：${escape(data.form.coverage_text)}${(data.form.coverage_missing || []).length ? ` · <b>缺 ${escape((data.form.coverage_missing || []).join("、"))}</b>` : ""}</p>` : ""}${data.form.eval_groups ? `<p class="hint">评估集：已建 ${data.form.eval_groups} 张（分类型报告用它）</p>` : (data.form.eval_plan && data.form.eval_plan.groups ? `<p class="hint">评估集：<b>未建立</b>，可建 ${data.form.eval_plan.groups} 张 —— 点下方「重建评估集」</p>` : "")}`;
+    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="100" value="${Math.min(Math.min(self,other),100)}" aria-label="训练数据准备程度"></progress>${tier ? `<p class="hint"><b>${tier}</b></p>` : ''}${hint}<p class="hint">待训练 ${data.form.pending_count ?? 0} 张 · 当前判定阈值 ${(data.form.threshold ?? 0.6).toFixed(2)}</p>${data.form.capture_pending ? `<p class="hint">聊天捕获待确认（本角色）：<b>${data.form.capture_pending}</b> 组 ${button('去「待确认」页处理','data-goto-capture')}</p>` : ''}</p>` : ""}${data.form.eval_groups ? `<p class="hint">评估集：已建 ${data.form.eval_groups} 组（跨版本可比的那批图）</p>` : (data.form.eval_plan && data.form.eval_plan.groups ? `<p class="hint">评估集：<b>未建立</b>，可建 ${data.form.eval_plan.groups} 张 —— 点下方「重建评估集」</p>` : "")}`;
   }
   const env = data.env, form = data.form;
   if (!deviceChosen && env?.installed && !env.detecting) {
@@ -276,14 +469,31 @@ function renderTraining() {
   cudaButton.hidden = cpuOnly;
   cudaButton.disabled = !env?.cuda;
   if (!data.jobs) return;
-  const list = data.jobs.rows;
-  $('job-count').textContent = `${list.length} 个任务`;
-  $('job-list').innerHTML = list.length ? list.map(row => `<article class="job"><div class="job-title"><h3>${escape(row.name)}</h3>${badge(row.device_text)}${row.input_size ? badge(`${row.input_size}×${row.input_size}`) : ''}${badge(row.state_text,row.state === 'complete' ? 'good' : ['failed','interrupted'].includes(row.state) ? 'error' : 'warn')}<span class="mono muted">${escape(row.id.slice(0,8))}</span></div><p>${escape(row.progress_text)}</p><div class="progress-row"><progress max="100" value="${Math.max(0,Math.min(100,row.percent))}" aria-label="${escape(row.name)}进度"></progress><span>${row.percent}%</span></div>${row.error ? `<p style="color:var(--danger)">${escape(row.error)}</p>` : ''}<div class="job-footer"><small>${escape(row.time_text)}</small><div class="row">${row.can_pause ? button('暂停',`data-job-action="pause" data-id="${escape(row.id)}"`,busy) : ''}${row.can_resume ? button('继续',`data-job-action="resume" data-id="${escape(row.id)}"`,busy) : ''}${row.can_cancel ? button('取消',`data-job-action="cancel" data-id="${escape(row.id)}"`,busy,'danger') : ''}${row.has_report ? button('查看报告',`data-report="${escape(row.id)}"`) + button('查看错判',`data-errors="${escape(row.id)}"`) : ''}</div></div></article>`).join('') : empty('还没有训练任务','准备好正负例后，从左侧开始第一次训练。');
-  $('report-select').innerHTML = '<option value="">选择已完成任务</option>' + list.filter(row => row.has_report).map(row => `<option value="${escape(row.id)}">${escape(row.name)}</option>`).join('');
+  const all = data.jobs.rows;
+  const visible = all.filter(jobMatches);
+  const visibleIds = new Set(visible.map(row => row.id));
+  for (const id of [...jobSelected]) if (!visibleIds.has(id)) jobSelected.delete(id);
+  $('job-count').textContent = visible.length === all.length ? `${all.length} 个任务` : `${visible.length} / ${all.length} 个任务`;
+  const shown = jobExpanded ? visible : visible.slice(0, JOB_PAGE_SIZE);
+  const deletable = row => ['complete','failed','cancelled','interrupted','paused'].includes(row.state);
+  $('job-list').innerHTML = shown.length ? shown.map(row => `<article class="job"><div class="job-title">${deletable(row) ? `<input type="checkbox" data-job-select="${escape(row.id)}" aria-label="选择 ${escape(row.name)}" ${jobSelected.has(row.id) ? 'checked' : ''}>` : ''}<h3>${escape(row.name)}</h3>${badge(row.device_text)}${row.input_size ? badge(`${row.input_size}×${row.input_size}`) : ''}${badge(row.state_text,row.state === 'complete' ? 'good' : ['failed','interrupted'].includes(row.state) ? 'error' : 'warn')}<span class="mono muted">${escape(row.id.slice(0,8))}</span></div><p>${escape(row.progress_text)}</p><div class="progress-row"><progress max="100" value="${Math.max(0,Math.min(100,row.percent))}" aria-label="${escape(row.name)}进度"></progress><span>${row.percent}%</span></div>${row.error ? `<p style="color:var(--danger)">${escape(row.error)}</p>` : ''}<div class="job-footer"><small>${escape(row.time_text)}</small><div class="row">${row.can_pause ? button('暂停',`data-job-action="pause" data-id="${escape(row.id)}"`,busy) : ''}${row.can_resume ? button('继续',`data-job-action="resume" data-id="${escape(row.id)}"`,busy) : ''}${row.can_cancel ? button('取消',`data-job-action="cancel" data-id="${escape(row.id)}"`,busy,'danger') : ''}${row.has_report ? button('查看报告',`data-report="${escape(row.id)}"`) + button('查看错判',`data-errors="${escape(row.id)}"`) : ''}${deletable(row) ? button('删除记录',`data-job-delete="${escape(row.id)}"`,busy,'danger') : ''}</div></div></article>`).join('') : empty(all.length ? '没有符合条件的任务' : '还没有训练任务', all.length ? '换一个角色或状态筛选试试。' : '准备好正负例后，从左侧开始第一次训练。');
+  $('job-more').hidden = visible.length <= JOB_PAGE_SIZE;
+  $('job-more-text').textContent = `共 ${visible.length} 条`;
+  $('job-toggle').textContent = jobExpanded ? '收起' : `显示全部 ${visible.length} 条`;
+  renderJobSelection();
+  $('report-select').innerHTML = '<option value="">选择已完成任务</option>' + visible.filter(row => row.has_report).map(row => `<option value="${escape(row.id)}">${escape(row.name)}</option>`).join('');
   $('report-select').value = reportJob;
-  $('report-compare-select').innerHTML = '<option value="">不对比</option>' + list.filter(row => row.has_report && row.id !== reportJob).map(row => `<option value="${escape(row.id)}">${escape(row.name)}</option>`).join('');
+  $('report-compare-select').innerHTML = '<option value="">不对比</option>' + visible.filter(row => row.has_report && row.id !== reportJob).map(row => `<option value="${escape(row.id)}">${escape(row.name)}</option>`).join('');
   $('report-compare-select').value = compareJob;
   renderReport();
+}
+function renderJobSelection() {
+  $('job-selection-bar').hidden = !jobSelected.size;
+  $('job-selection-text').textContent = `已选 ${jobSelected.size} 条`;
+}
+function jobMatches(row) {
+  return (jobScope === 'all' || row.character === character)
+    && (jobState === 'all' || (jobState === 'failed' ? ['failed','interrupted'].includes(row.state) : row.state === jobState));
 }
 function reportTable(metrics) {
   const test = metrics.find(row => row.split === '测试');
@@ -327,40 +537,16 @@ function thresholdPanel(t) {
     ${rows ? `<details class="technical"><summary>阈值扫描（验证集）</summary><div class="table-wrap"><table class="maibot-table"><thead><tr><th>阈值</th><th>预测为是</th><th>精确率</th><th>召回</th><th>F1</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : ''}
   </div>`;
 }
-function stylePanel(styles) {
-  if (!styles) return '';
-  const rows = Array.isArray(styles.rows) ? styles.rows : [];
-  const coverage = Array.isArray(styles.coverage) ? styles.coverage : [];
-  const covered = coverage.filter(row => row.style).map(row => `${escape(row.label)} ${row.train}`).join(' · ');
-  const missing = coverage.filter(row => row.verdict === 'missing').map(row => row.label);
-  let html = `<div class="card-head" style="margin-top:24px"><div><h3>按内容类型</h3><p>固定评估集，跨版本可比${styles.eval_count ? ` · ${styles.eval_count} 张` : ''}</p></div></div>`;
-  html += `<p class="hint">训练集覆盖：${escape(covered || '全部未标注')}${missing.length ? ` · <b>缺 ${escape(missing.join('、'))}</b>` : ''}</p>`;
-  if (rows.length) {
-    html += `<div class="table-wrap"><table class="maibot-table"><thead><tr><th>类型</th><th>张数</th><th>召回</th><th>误报</th><th>状态</th></tr></thead><tbody>${rows.map(row => `<tr><td>${escape(row.label)}</td><td>${row.n}</td><td>${row.unreliable ? '样本不足' : percent(row.recall)}</td><td>${row.unreliable || !row.negatives ? '—' : percent(row.fpr)}</td><td>${row.unreliable ? '样本不足' : '可用'}</td></tr>`).join('')}</tbody></table></div>`;
-  }
-  const textRows = Array.isArray(styles.text_rows) ? styles.text_rows : [];
-  if (textRows.length) {
-    html += `<div class="card-head" style="margin-top:22px"><div><h3>文字叠加</h3><p>标记而非分档：同一批图在这里会被再数一次</p></div></div>`;
-    html += `<div class="table-wrap"><table class="maibot-table"><thead><tr><th>文字</th><th>张数</th><th>召回</th><th>状态</th></tr></thead><tbody>${textRows.map(row => `<tr><td>${escape(row.label)}</td><td>${row.n}</td><td>${row.unreliable ? '样本不足' : percent(row.recall)}</td><td>${row.unreliable ? '样本不足' : '可用'}</td></tr>`).join('')}</tbody></table></div>`;
-  }
-  const negRows = Array.isArray(styles.neg_rows) ? styles.neg_rows : [];
-  if (negRows.length) {
-    html += `<div class="card-head" style="margin-top:22px"><div><h3>按负例分档</h3><p>模型把哪些图误认成了这个角色（身份轴，与上面的形态轴独立）</p></div></div>`;
-    html += `<div class="table-wrap"><table class="maibot-table"><thead><tr><th>分档</th><th>张数</th><th>被判为角色</th><th>误报率</th></tr></thead><tbody>${negRows.map(row => `<tr><td>${escape(row.label)}</td><td>${row.n}</td><td>${row.flagged}</td><td>${row.unreliable ? '样本不足' : percent(row.fpr)}</td></tr>`).join('')}</tbody></table></div>`;
-  }
-  if (styles.advice) html += `<p class="hint">${escape(styles.advice)}</p>`;
-  if (!styles.evaluated && styles.plan && styles.plan.groups) {
-    const parts = Object.entries(styles.plan.by_style || {}).map(([key, count]) => `${styles.labels?.[key] || key} ${count}`).join(' · ');
-    html += `<p class="hint">可建 ${styles.plan.groups} 张评估集${parts ? `（${escape(parts)}）` : ''}，其中来自训练集 ${styles.plan.from_train} 张。</p>`;
-  }
-  return html;
-}
 function renderReport() {
   if (!reportJob || !data.report) { $('report-content').innerHTML = empty('选择一份报告','核对精确率、召回率和错判图片，再决定是否启用模型。'); return; }
   const report = data.report, metrics = report.metrics;
   if (!Array.isArray(metrics)) throw new Error('报告指标格式不正确');
   const open = $('report-content').querySelector('details')?.open;
-  const jobName = id => data.jobs?.rows.find(row => row.id === id)?.name ?? '';
+  // A cleaned-up task keeps its report under the model, so the list may no longer
+  // know the name; the report itself carries it.
+  const jobName = id => data.jobs?.rows.find(row => row.id === id)?.name
+    || (id === reportJob ? data.report?.name : id === compareJob ? data.compareReport?.name : '')
+    || id.slice(0, 8);
   let html = `<p class="report-summary">${escape(report.summary)}</p>`;
   if (compareJob) {
     if (!data.compareReport) { $('report-content').innerHTML = html + empty('正在读取对比报告…','请稍候…'); return; }
@@ -369,18 +555,30 @@ function renderReport() {
   } else {
     html += reportTable(metrics);
   }
-  html += stylePanel(report.styles);
   html += thresholdPanel(report.threshold);
   html += `<button class="maibot-button" style="margin-top:16px" data-errors="${escape(reportJob)}">查看错判</button>`;
   if (report.technical) html += `<details class="technical" ${open ? 'open' : ''}><summary>技术明细</summary><pre class="log maibot-inset">${escape(report.technical)}</pre></details>`;
   $('report-content').innerHTML = html;
 }
 function renderModels() {
-  if (!data.versions) return;
+  if (!data.versions) { $('version-selection-bar').hidden = true; return; }
   $('rollback').disabled = busy || !data.versions.can_rollback;
   $('rollback-text').textContent = data.versions.rollback_text;
   $('threshold-note').textContent = `当前判定阈值 ${(data.versions.threshold ?? 0.6).toFixed(2)} · 报告指标按该阈值重算，版本卡片里的数字是训练时 0.50 口径`;
-  $('version-list').innerHTML = data.versions.rows.length ? data.versions.rows.map(row => `<article class="version ${row.status === '使用中' ? 'active' : ''} maibot-card"><div class="row between"><h3>${escape(row.name)}</h3>${badge(`${row.input_size}×${row.input_size}`)}${badge(row.status,row.status === '使用中' ? 'good' : '')}</div><p class="mono">${escape(row.id)}</p><p>验证集 · ${escape(row.validation_text)}</p><p>测试集 · ${escape(row.test_text)}</p><div class="row">${button(row.can_activate ? '启用此版本' : '当前使用中',`data-version="${escape(row.id)}"`,busy || !row.can_activate,row.can_activate ? 'primary' : '')}${button('查看报告',`data-report="${escape(row.job_id)}"`)}${button('查看错判',`data-errors="${escape(row.job_id)}"`)}</div></article>`).join('') : empty('尚无已训练版本','完成训练与核验后，新版本会出现在这里。');
+  const rows = data.versions.rows;
+  const deletable = row => row.status !== '使用中';
+  const alive = new Set(rows.filter(deletable).map(row => row.id));
+  for (const id of [...versionSelected]) if (!alive.has(id)) versionSelected.delete(id);
+  $('version-list').innerHTML = rows.length ? rows.map(row => {
+    const canDelete = deletable(row);
+    return `<article class="version ${row.status === '使用中' ? 'active' : ''} maibot-card"><div class="row between"><div class="row">${canDelete ? `<input type="checkbox" data-version-select="${escape(row.id)}" aria-label="选择 ${escape(row.name)}" ${versionSelected.has(row.id) ? 'checked' : ''}>` : ''}<h3>${escape(row.name)}</h3></div><div class="row">${badge(`${row.input_size}×${row.input_size}`)}${badge(formatSize(row.size))}${badge(row.status,row.status === '使用中' ? 'good' : '')}</div></div><p class="mono">${escape(row.id)}</p><p>验证集 · ${escape(row.validation_text)}</p><p>测试集 · ${escape(row.test_text)}</p><div class="row">${button(row.can_activate ? '启用此版本' : '当前使用中',`data-version="${escape(row.id)}"`,busy || !row.can_activate,row.can_activate ? 'primary' : '')}${button('查看报告',`data-report="${escape(row.job_id)}"`)}${button('查看错判',`data-errors="${escape(row.job_id)}"`)}${canDelete ? button('删除版本',`data-version-delete="${escape(row.id)}"`,busy,'danger') : ''}</div></article>`;
+  }).join('') : empty('尚无已训练版本','完成训练与核验后，新版本会出现在这里。');
+  renderVersionSelection();
+}
+function renderVersionSelection() {
+  const picked = (data.versions?.rows ?? []).filter(row => versionSelected.has(row.id));
+  $('version-selection-bar').hidden = !picked.length;
+  $('version-selection-text').textContent = `已选 ${picked.length} 个版本 · 合计 ${formatSize(picked.reduce((sum,row) => sum + (Number(row.size) || 0), 0))}`;
 }
 function renderTests() {
   if (!data.results) return;
@@ -410,12 +608,106 @@ async function operate(alias, args = {}, success = '操作已完成') {
   try {
     const result = await maibot.action(alias, args);
     if (alias === 'test_upload' && result.status !== 'ok') throw new Error(result.summary || result.error || '识别未完成');
-    if (['batch_positive','batch_negative','batch_remove','remove_all','images_batch_style'].includes(alias)) selected.clear();
+    if (['batch_positive','batch_negative','batch_remove','remove_all'].includes(alias)) selected.clear();
     notice(success, 'good'); return true;
   } catch (error) { notice(error.message.replace(/^ApiError:\s*/, ''), 'error'); return false; }
   finally { busy = false; render(); void load(); }
 }
 function selectionAdd(id) { if (selected.size >= 1000 && !selected.has(id)) { notice('每批最多选择 1000 张图片。','error'); return; } selected.add(id); }
+let confirmAction = null;
+function askConfirm({ title, text, okLabel = '确认', danger = false, action }) {
+  $('confirm-title').textContent = title;
+  $('confirm-text').textContent = text;
+  $('confirm-ok').textContent = okLabel;
+  $('confirm-ok').className = `maibot-button ${danger ? 'maibot-button-danger' : 'maibot-button-primary'}`;
+  confirmAction = action;
+  $('confirm-dialog').showModal();
+}
+function askDeleteJobs(ids) {
+  ids = [...new Set(ids)].filter(Boolean);
+  if (!ids.length) return;
+  const paused = ids.filter(id => data.jobs?.rows.find(row => row.id === id)?.state === 'paused').length;
+  askConfirm({
+    title: '删除任务记录',
+    text: `将删除 ${ids.length} 条任务记录${paused ? `，其中 ${paused} 条已暂停，断点会一并删除、无法再继续` : ''}。\n训练快照与断点会删除；已完成任务的评测报告会留档到对应模型版本，模型权重不受影响。`,
+    okLabel: '确认删除',
+    danger: true,
+    action: () => deleteJobs(ids),
+  });
+}
+async function deleteJobs(ids) {
+  if (busy || uploadRunning) return;
+  busy = true; render(); notice('正在删除任务记录…');
+  try {
+    const result = await maibot.action('delete_jobs', { jobs: JSON.stringify(ids) });
+    if (result && result.success === false) throw new Error(result.error || '删除失败');
+    for (const id of ids) jobSelected.delete(id);
+    if (ids.includes(reportJob)) { reportJob = ''; data.report = null; }
+    if (ids.includes(compareJob)) { compareJob = ''; data.compareReport = null; }
+    jobExpanded = false;
+    const failed = Array.isArray(result?.failed) ? result.failed.length : 0;
+    if (failed) notice(`已删除 ${result.deleted ?? 0} 条，${failed} 条目录仍被占用、记录已保留，请稍后重试`, 'error');
+    else notice(`已删除 ${result?.deleted ?? ids.length} 条任务记录`, 'good');
+  } catch (error) {
+    notice(error.message.replace(/^ApiError:\s*/, ''), 'error');
+  } finally {
+    busy = false; render(); void load();
+  }
+}
+function askDeleteVersions(ids) {
+  ids = [...new Set(ids)].filter(Boolean);
+  if (!ids.length) return;
+  const rows = (data.versions?.rows ?? []).filter(row => ids.includes(row.id));
+  if (rows.some(row => row.status === '使用中')) { notice('使用中的版本不能删除', 'error'); versionSelected.clear(); renderModels(); return; }
+  const size = rows.reduce((sum,row) => sum + (Number(row.size) || 0), 0);
+  const names = rows.slice(0, 8).map(row => `· ${row.name}`).join('\n') + (rows.length > 8 ? `\n· 其余 ${rows.length - 8} 个` : '');
+  askConfirm({
+    title: '删除模型版本',
+    text: `将删除 ${rows.length || ids.length} 个版本（合计 ${formatSize(size)}），无法恢复：\n${names}\n模型权重、审计文件和版本目录里的归档报告会移除；任务记录保留，仍挂在任务页的报告不受影响。若删除的是回退目标，回退记录会一并清除。`,
+    okLabel: '确认删除',
+    danger: true,
+    action: () => deleteVersions(ids),
+  });
+}
+async function deleteVersions(ids) {
+  if (busy || uploadRunning) return;
+  busy = true; render(); notice('正在删除模型版本…');
+  try {
+    const result = await maibot.action('delete_versions', { versions: JSON.stringify(ids) });
+    if (result && result.success === false) throw new Error(result.error || '删除失败');
+    for (const id of ids) versionSelected.delete(id);
+    const failed = Array.isArray(result?.failed) ? result.failed.length : 0;
+    const released = formatSize(result?.released ?? 0);
+    if (failed) notice(`已删除 ${result.deleted ?? 0} 个版本，释放 ${released}；${failed} 个目录仍被占用、记录已保留，请稍后重试`, 'error');
+    else notice(`已删除 ${result?.deleted ?? ids.length} 个版本，释放 ${released}`, 'good');
+  } catch (error) {
+    notice(error.message.replace(/^ApiError:\s*/, ''), 'error');
+  } finally {
+    busy = false; render(); void load();
+  }
+}
+function jobFilterChanged() {
+  jobExpanded = false;
+  jobSelected.clear();
+  const alive = new Set((data.jobs?.rows ?? []).filter(jobMatches).map(row => row.id));
+  if (reportJob && !alive.has(reportJob)) { reportJob = ''; data.report = null; }
+  if (compareJob && !alive.has(compareJob)) { compareJob = ''; data.compareReport = null; }
+  saveUi();
+  renderTraining();
+}
+document.addEventListener('change', event => {
+  const node = event.target instanceof Element ? event.target.closest('[data-job-select],[data-version-select]') : null;
+  if (!node) return;
+  if (node.dataset.jobSelect) {
+    if (node.checked) jobSelected.add(node.dataset.jobSelect); else jobSelected.delete(node.dataset.jobSelect);
+    renderJobSelection();
+    return;
+  }
+  if (node.dataset.versionSelect) {
+    if (node.checked) versionSelected.add(node.dataset.versionSelect); else versionSelected.delete(node.dataset.versionSelect);
+    renderVersionSelection();
+  }
+});
 document.addEventListener('click', event => {
   const node = event.target.closest('button');
   if (!node || node.disabled) return;
@@ -423,28 +715,18 @@ document.addEventListener('click', event => {
     const plan = data.form && data.form.eval_plan;
     const cost = plan && plan.groups
       ? `\n\n将占用 ${plan.groups} 张：训练集 ${plan.from_train} · 验证集 ${plan.from_val} · 测试集 ${plan.from_test}；训练集会相应减少，历史报告不再可比。`
-      : '\n\n会用当前已标注类型的图片重新挑选，原评估集被释放，历史报告不再可比。';
-    if (!confirm('重建评估集？' + cost)) return;
-    void operate('eval_rebuild', { character }); return;
+      : '\n\n会用当前训练库重新挑选，原评估集被释放，历史报告不再可比。';
+    askConfirm({ title: '重建评估集？', text: cost.trim(), okLabel: '重建评估集', action: () => operate('eval_rebuild', { character }) });
+    return;
   }
-  if (node.dataset.mode) { mode = node.dataset.mode; for (const item of document.querySelectorAll('[data-mode]')) item.setAttribute('aria-pressed',String(item.dataset.mode === mode)); }
-  if (node.dataset.device) { deviceChosen = true; device = node.dataset.device; for (const item of document.querySelectorAll('[data-device]')) item.setAttribute('aria-pressed',String(item.dataset.device === device)); renderTraining(); }
+  if (node.dataset.mode) { mode = node.dataset.mode; saveUi(); for (const item of document.querySelectorAll('[data-mode]')) item.setAttribute('aria-pressed',String(item.dataset.mode === mode)); }
+  if (node.dataset.device) { deviceChosen = true; device = node.dataset.device; saveUi(); for (const item of document.querySelectorAll('[data-device]')) item.setAttribute('aria-pressed',String(item.dataset.device === device)); renderTraining(); }
   if (node.dataset.imageLabel) void operate('label',{ image_id:node.dataset.id,label:node.dataset.imageLabel },'图片身份已更新');
   if (node.dataset.imageAction) void operate(node.dataset.imageAction,{ image_id:node.dataset.id },'图片库已更新');
-  if (node.dataset.batch === 'batch_style' && selected.size) {
-    const picked = $('batch-style').value; if (!picked) { notice('先选择内容类型', 'error'); return; }
-    void operate('images_batch_style',{ image_ids:[...selected].join(','), style:picked === 'clear' ? '' : picked },'内容类型已更新'); return;
-  }
-  if (node.dataset.batch === 'batch_text' && selected.size) {
-    const picked = $('batch-text').value; if (!picked) { notice('先选择文字标记', 'error'); return; }
-    void operate('images_batch_style',{ image_ids:[...selected].join(','), has_text:picked === 'clear' ? '' : picked },'文字标记已更新'); return;
-  }
-  if (node.dataset.batch === 'batch_neg' && selected.size) {
-    const picked = $('batch-neg').value; if (!picked) { notice('先选择负例类型', 'error'); return; }
-    void operate('images_batch_style',{ image_ids:[...selected].join(','), neg_type:picked === 'clear' ? '' : picked },'负例类型已更新'); return;
-  }
   if (node.dataset.batch && selected.size) void operate(node.dataset.batch,{ image_ids:[...selected].join(',') },'批量操作已完成');
   if (node.dataset.jobAction) void operate(node.dataset.jobAction,{ job_id:node.dataset.id });
+  if (node.dataset.jobDelete) { askDeleteJobs([node.dataset.jobDelete]); return; }
+  if (node.dataset.versionDelete) { askDeleteVersions([node.dataset.versionDelete]); return; }
   if (node.dataset.report) { reportJob = node.dataset.report; data.report = null; showSection('training'); }
   if (node.dataset.errors) { errorJob = node.dataset.errors; filter = 'errors'; page = 1; generation++; picturesLoading = true; showSection('images'); }
   if (node.dataset.version) void operate('activate',{ version:node.dataset.version },'模型已校验并启用');
@@ -453,6 +735,28 @@ document.addEventListener('click', event => {
   if (node.dataset.envMode === 'custom') { $('custom-python').value = data.env?.is_private ? data.env.python_path : ''; $('environment-dialog').showModal(); }
   if (node.dataset.promote) {
     void operate('promote',{result_id:node.dataset.promote,character,label:node.dataset.promoteLabel},'已加入训练库');
+    return;
+  }
+  if (node.dataset.gotoCapture !== undefined) {
+    const scope = $('capture-character');
+    if (scope) { captureCharacter = character; scope.value = captureCharacter; saveUi(); }
+    capturePage = 1; captureFocus = 0; captureSkipped.clear(); data.captureQueue = null;
+    showSection('capture');
+    return;
+  }
+  if (node.dataset.captureConfirm) { void captureConfirm(node.dataset.captureConfirm); return; }
+  if ('captureSkip' in node.dataset) { captureSkip(); return; }
+  if (node.dataset.captureFocus !== undefined) { captureFocus = Number(node.dataset.captureFocus); renderCapture(); return; }
+  if (node.dataset.captureReset !== undefined) { captureSkipped.clear(); captureFocus = 0; renderCapture(); return; }
+  if (node.dataset.captureNextPage !== undefined) { captureGoPage(capturePage + 1); return; }
+  if (node.dataset.captureUndo !== undefined) { void captureUndoLast(); return; }
+  if (node.dataset.capturePurge !== undefined) {
+    const row = captureCurrent();
+    if (row) void operate('capture_purge',{ image_id:row.id, character:row.character || captureCharacter || character },'已彻底删除');
+    return;
+  }
+  if (node.dataset.captureCleanup !== undefined) {
+    void operate('capture_cleanup', captureCharacter ? { character:captureCharacter } : {}, '旧数据已清理');
     return;
   }
   if (node.dataset.retest) void operate('test_upload',{upload_id:'',result_id:node.dataset.retest},'识别已更新');
@@ -464,24 +768,26 @@ document.addEventListener('click', event => {
   if (node.dataset.thresholdReset !== undefined) void operate('reset_threshold',{ character },'判定阈值已恢复默认');
   if (['stop','start'].includes(node.dataset.action)) void operate(node.dataset.action);
   if (node.dataset.openUpload) openUpload(node.dataset.openUpload);
-  if (node.dataset.uploadLabel && !uploadRunning) { uploadLabel = node.dataset.uploadLabel; for (const item of document.querySelectorAll('[data-upload-label]')) item.setAttribute('aria-pressed',String(item.dataset.uploadLabel === uploadLabel)); const negField = $('upload-neg-field'); if (negField) { negField.hidden = uploadLabel !== 'other'; if (uploadLabel !== 'other') { uploadNegType = ''; if ($('upload-neg-type')) $('upload-neg-type').value = ''; } } }
+  if (node.dataset.uploadLabel && !uploadRunning) { uploadLabel = node.dataset.uploadLabel; for (const item of document.querySelectorAll('[data-upload-label]')) item.setAttribute('aria-pressed',String(item.dataset.uploadLabel === uploadLabel)); }
   if (node.dataset.removeFile !== undefined && !uploadRunning) { const row = uploadRows.splice(Number(node.dataset.removeFile),1)[0]; URL.revokeObjectURL(row.preview); renderUpload(); }
 });
 document.addEventListener('change', event => {
   const node = event.target;
   if (node.dataset.selectImage) { if (node.checked) selectionAdd(node.dataset.selectImage); else selected.delete(node.dataset.selectImage); updateSelection(); }
 });
-$('image-filter').onchange = event => { filter = event.target.value; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
-$('style-filter').onchange = event => { styleFilter = event.target.value; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
-$('text-filter').onchange = event => { textFilter = event.target.value; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
+$('image-filter').onchange = event => { filter = event.target.value; saveUi(); page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
 $('character-select').onchange = event => {
   character = event.target.value;
   // Selection, report and error-filter state all belong to the previous character:
   // keeping them would let a batch delete touch another character's images.
   selected.clear();
-  filter = 'all'; errorJob = ''; reportJob = ''; compareJob = ''; page = 1;
+  filter = 'all';
+  errorJob = ''; reportJob = ''; compareJob = ''; page = 1;
+  jobSelected.clear(); jobExpanded = false;
+  versionSelected.clear();
   data.form = data.versions = data.report = data.compareReport = data.pictures = null;
   generation++; picturesLoading = true;
+  saveUi();
   render(); void load();
 };
 $('return-library').onclick = () => { filter = 'all'; errorJob = ''; page = 1; generation++; picturesLoading = true; renderImages(); void load(); };
@@ -496,11 +802,37 @@ $('page-jump').onkeydown = event => { if (event.key === 'Enter') { event.prevent
 $('select-page').onclick = () => { for (const row of data.pictures?.rows ?? []) selectionAdd(row.id); updateSelection(); };
 $('unselect-page').onclick = () => { for (const row of data.pictures?.rows ?? []) selected.delete(row.id); updateSelection(); };
 $('clear-selection').onclick = () => { selected.clear(); updateSelection(); };
-$('input-size').onchange = event => { inputSize = Number(event.target.value); };
+$('input-size').onchange = event => { inputSize = Number(event.target.value); saveUi(); };
+$('job-scope').onchange = event => { jobScope = event.target.value; jobFilterChanged(); };
+$('job-state').onchange = event => { jobState = event.target.value; jobFilterChanged(); };
+$('job-toggle').onclick = () => { jobExpanded = !jobExpanded; renderTraining(); };
+$('job-clear-selection').onclick = () => { jobSelected.clear(); renderTraining(); };
+$('job-delete-selected').onclick = () => askDeleteJobs([...jobSelected]);
+$('version-clear-selection').onclick = () => { versionSelected.clear(); renderModels(); };
+$('version-delete-selected').onclick = () => askDeleteVersions([...versionSelected]);
 $('report-select').onchange = event => { reportJob = event.target.value; if (compareJob === reportJob) compareJob = ''; data.report = null; data.compareReport = null; generation++; renderReport(); void load(); };
 $('report-compare-select').onchange = event => { compareJob = event.target.value; data.compareReport = null; generation++; renderReport(); void load(); };
 $('refresh').onclick = () => { notice(''); void load(); };
 $('return-page').onclick = () => showSection(HOME_PAGE);
+$('capture-character').onchange = event => {
+  captureCharacter = event.target.value;
+  saveUi();
+  capturePage = 1; captureFocus = 0; captureSkipped.clear();
+  data.captureQueue = null; generation++; renderCapture(); void load();
+};
+$('capture-prev').onclick = () => { if (capturePage > 1) captureGoPage(capturePage - 1); };
+$('capture-next').onclick = () => captureGoPage(capturePage + 1);
+document.addEventListener('keydown', event => {
+  if (tab !== 'capture' || busy || loading || uploadRunning) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest('input,select,textarea')) return;
+  // Space on a focused button must click that button, not skip the group.
+  if (event.key === ' ' && target?.closest('button')) return;
+  if (event.key === '1') { event.preventDefault(); void captureConfirm('self'); return; }
+  if (event.key === '2') { event.preventDefault(); void captureConfirm('other'); return; }
+  if (event.key === ' ') { event.preventDefault(); captureSkip(); return; }
+  if (event.key.toLowerCase() === 'u') { event.preventDefault(); void captureUndoLast(); }
+});
 
 function releasePreviews() { for (const row of uploadRows) URL.revokeObjectURL(row.preview); }
 function openUpload(kind) {
@@ -536,8 +868,7 @@ function renderUpload() {
 }
 async function startUpload(retry = false) {
   if (uploadRunning) return;
-  if (!retry) { uploadStyle = $('upload-style')?.value || ''; uploadNegType = uploadLabel === 'other' ? ($('upload-neg-type')?.value || '') : ''; uploadHasText = $('upload-has-text')?.value || ''; }
-  const args = retry && retryArgs ? {...retryArgs} : uploadKind === 'library' ? {upload_label:uploadLabel, upload_style:uploadStyle, upload_neg_type:uploadNegType, upload_has_text:uploadHasText, character} : {};
+  const args = retry && retryArgs ? {...retryArgs} : uploadKind === 'library' ? {upload_label:uploadLabel, character} : {};
   retryArgs = {...args};
   const pending = uploadRows.filter(row => retry ? row.phase === 'failed' : row.phase === 'waiting');
   if (!pending.length) return;
@@ -576,6 +907,15 @@ $('start-upload').onclick = () => void startUpload();
 $('retry-upload').onclick = () => void startUpload(true);
 $('cancel-upload').onclick = () => uploadController?.abort();
 $('close-environment').onclick = () => $('environment-dialog').close();
+$('close-confirm').onclick = () => $('confirm-dialog').close();
+$('confirm-cancel').onclick = () => $('confirm-dialog').close();
+$('confirm-ok').onclick = () => {
+  const action = confirmAction;
+  confirmAction = null;
+  $('confirm-dialog').close();
+  if (action) void action();
+};
+$('confirm-dialog').addEventListener('close', () => { confirmAction = null; });
 $('copy-env-log').onclick = async () => {
   const text = $('env-log').textContent;
   const fallback = () => {
@@ -602,7 +942,18 @@ for (const section of document.querySelectorAll('.section')) {
   actions.hidden = true;
   $('page-actions').append(actions);
 }
+$('image-filter').value = filter;
+for (const item of document.querySelectorAll('[data-mode]')) item.setAttribute('aria-pressed', String(item.dataset.mode === mode));
+// The review queue has its own character scope; the header selector would look
+// like a queue filter but only changes the model badge.
+if (HOME_PAGE === 'capture') {
+  const label = document.querySelector('label[for="character-select"]');
+  if (label) label.hidden = true;
+  $('character-select').hidden = true;
+}
 await maibot.ready;
+// Restore before the first load so every query runs with the remembered scope.
+try { applyUi(await query('ui')); } catch {}
 showSection(HOME_PAGE);
 setInterval(() => { if (!document.hidden && !busy && !loading && !uploadRunning && ['training','environment'].includes(tab)) void load(true); },5000);
 </script>

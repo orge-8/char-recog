@@ -179,7 +179,7 @@ def test_report_metrics_follow_the_current_gate():
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
             style_coverage=lambda character: [],
-            job=lambda job_id: {"character": CHAR},
+            job_or_model=lambda job_id: {"character": CHAR, "created": 0},
             report=lambda job_id: report,
             threshold=lambda character: 0.6,
         )
@@ -217,7 +217,7 @@ def test_report_without_validation_predictions_still_renders():
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
             style_coverage=lambda character: [],
-            job=lambda job_id: {"character": CHAR},
+            job_or_model=lambda job_id: {"character": CHAR, "created": 0},
             report=lambda job_id: report,
             threshold=lambda character: 0.6,
         )
