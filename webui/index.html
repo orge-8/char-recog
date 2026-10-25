@@ -425,7 +425,7 @@ function renderTraining() {
     const {self,other} = data.form.groups;
     const tier = {insufficient:'样本不足',thin:'样本偏少',usable:'可用',good:'样本充足'}[data.form.level] || '';
     const hint = [data.form.advice, data.form.negative_thin ? '负例偏少：「其他角色」和「非角色内容」都要标一些——只用一类当负例时，模型对另一类几乎不设防（实测缺口 30–40 个百分点）。' : ''].filter(Boolean).map(text => `<p class="hint">${escape(text)}</p>`).join('');
-    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="100" value="${Math.min(Math.min(self,other),100)}" aria-label="训练数据准备程度"></progress>${tier ? `<p class="hint"><b>${tier}</b></p>` : ''}${hint}<p class="hint">待训练 ${data.form.pending_count ?? 0} 张 · 当前判定阈值 ${(data.form.threshold ?? 0.6).toFixed(2)}</p>${data.form.capture_pending ? `<p class="hint">聊天捕获待确认（本角色）：<b>${data.form.capture_pending}</b> 组 ${button('去「待确认」页处理','data-goto-capture')}</p>` : ''}</p>` : ""}${data.form.eval_groups ? `<p class="hint">评估集：已建 ${data.form.eval_groups} 组（跨版本可比的那批图）</p>` : (data.form.eval_plan && data.form.eval_plan.groups ? `<p class="hint">评估集：<b>未建立</b>，可建 ${data.form.eval_plan.groups} 张 —— 点下方「重建评估集」</p>` : "")}`;
+    $('readiness').innerHTML = `<div class="row"><span>是${escape(character)} <b>${self}</b></span><span>不是${escape(character)} <b>${other}</b></span></div><progress max="100" value="${Math.min(Math.min(self,other),100)}" aria-label="训练数据准备程度"></progress>${tier ? `<p class="hint"><b>${tier}</b></p>` : ''}${hint}<p class="hint">待训练 ${data.form.pending_count ?? 0} 张 · 当前判定阈值 ${(data.form.threshold ?? 0.6).toFixed(2)}</p>${data.form.capture_pending ? `<p class="hint">聊天捕获待确认（本角色）：<b>${data.form.capture_pending}</b> 组 ${button('去「待确认」页处理','data-goto-capture')}</p>` : ''}${data.form.eval_groups ? `<p class="hint">评估集：已建 ${data.form.eval_groups} 组（跨版本可比的那批图）</p>` : (data.form.eval_plan && data.form.eval_plan.groups ? `<p class="hint">评估集：<b>未建立</b>，可建 ${data.form.eval_plan.groups} 张 —— 点下方「重建评估集」</p>` : "")}`;
   }
   const env = data.env, form = data.form;
   if (!deviceChosen && env?.installed && !env.detecting) {
@@ -950,7 +950,28 @@ if (HOME_PAGE === 'capture') {
   if (label) label.hidden = true;
   $('character-select').hidden = true;
 }
-await maibot.ready;
+// 宿主 SDK 握手是全部数据的唯一入口：握手不到，页面只会停在静态空壳上。
+// 这里必须带超时且失败可见 —— 否则表现是「图库一直转圈、下拉框空白、徽章停在
+// 加载中」，而控制台之外没有任何线索（0.6.1 就是这个状态）。
+async function boot() {
+  if (!window.maibot) throw new Error('页面没有拿到 maibot SDK：宿主未注入，或该页面已被「停止页面」');
+  let timer = 0;
+  try {
+    await Promise.race([
+      window.maibot.ready,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('与宿主握手超时（8 秒）：SDK 已注入但 ready 未完成')), 8000); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+try { await boot(); }
+catch (error) {
+  const banner = document.createElement('div');
+  banner.className = 'notice error';
+  banner.style.margin = '0 0 18px';
+  banner.textContent = `页面初始化失败：${error && error.message ? error.message : error}。请点右上角「重载页面」；仍失败请按 F12 看控制台堆栈。`;
+  (document.querySelector('.app') || document.body).prepend(banner);
+  throw error;
+}
 // Restore before the first load so every query runs with the remembered scope.
 try { applyUi(await query('ui')); } catch {}
 showSection(HOME_PAGE);

@@ -357,8 +357,8 @@ HOST_PROCESS_GRAPH = (
     "recog/processes.py",
     "recog/environment.py",
 )
-# 以 `python -m` 独立子进程运行的模块，不在宿主进程内
-SUBPROCESS_GRAPH = ("recog/probes.py", "recog/bootstrap.py", "recog/dependency_download.py")
+# 由独立子进程自举运行的模块（recog/launcher.py 用文件路径启动它们，不再走 `-m`）
+SUBPROCESS_GRAPH = ("recog/probes.py", "recog/bootstrap.py", "recog/launcher.py", "recog/dependency_download.py")
 # 依赖声明核验用全图：子进程同样需要 Pillow/numpy
 ALL_IMPORT_GRAPH = HOST_PROCESS_GRAPH + SUBPROCESS_GRAPH
 

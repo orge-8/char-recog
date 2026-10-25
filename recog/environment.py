@@ -24,6 +24,31 @@ PINNED_PACKAGES = [
     "psutil==7.2.2",
 ]
 
+# 子进程只靠 Popen(cwd=插件根) 让 `-m recog.*` 可导入是不够的：cwd 一旦不是插件根
+# （宿主换了工作目录、插件从非预期路径加载、以后有人改了 Popen 参数），`-m` 在启动
+# 阶段就报 `No module named 'recog'`，进程立刻消失，日志只留一行 —— 真机实测就是
+# 「安装任务一直处理中、版本一直检测中」。显式把插件根写进 PYTHONPATH，让自举不再
+# 依赖 cwd 这一隐含前提。
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+LAUNCHER = PLUGIN_ROOT / "recog" / "launcher.py"
+
+
+def child_env() -> dict:
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join([str(PLUGIN_ROOT), *([existing] if existing else [])])
+    return env
+
+
+def log_tail(path: Path, lines: int = 6) -> str:
+    """Last lines of a child's log, for turning a silent exit into a visible error."""
+    try:
+        text = path.read_text("utf-8", errors="replace").strip().splitlines()
+    except OSError:
+        return ""
+    return " / ".join(text[-lines:])
+
+
 def status(service):
     try:
         service.check_environment_idle()
@@ -34,7 +59,7 @@ def status(service):
         service.environment_checked = now
         service.environment_cache = {"installed": False, "cuda": False, "detecting": True}
         threading.Thread(target=probe_environment,
-                         args=(service, service.python, service.environment_cache, service.runtime_command("-m", "recog.probes", "environment_status")),
+                         args=(service, service.python, service.environment_cache, service.runtime_command("recog.probes", "environment_status")),
                          daemon=True).start()
     r = dict(service.environment_cache)
     return describe(service, r)
@@ -45,7 +70,8 @@ def probe_environment(service, python, token, command):
     try:
         result = subprocess.run(
             command,
-            cwd=Path(__file__).resolve().parents[1],
+            cwd=PLUGIN_ROOT,
+            env=child_env(),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -211,6 +237,12 @@ def submit(service, kind):
 def launch(service, kind, previous=None):
     root = service.store.root
     path = root / "environment-status.json"
+    controller = PLUGIN_ROOT / "recog" / "environment.py"
+    for required in (controller, LAUNCHER):
+        if not required.is_file():
+            error = f"插件目录里找不到 {required}，无法开始安装"
+            atomic_json(path, {"state": "failed", "kind": kind, "error": error})
+            raise ValueError(error)
     # Publish the pending task before spawn, so the parent never overwrites a
     # newer byte-progress record produced by a fast child.
     atomic_json(path, {**(previous or {}), "state": "running", "pid": os.getpid(),
@@ -218,15 +250,29 @@ def launch(service, kind, previous=None):
                        "phase": "recover" if previous else "prepare"})
     try:
         with (root / "environment.log").open("a" if previous else "w", encoding="utf-8") as log:
+            # 首行固定写清现场：控制器起不来时，这一行 + Python 自己那行报错就是全部线索。
+            log.write(f"[launch] python={sys.executable} launcher={LAUNCHER} plugin_root={PLUGIN_ROOT} pythonpath={child_env()['PYTHONPATH']}\n")
+            log.flush()
             process = subprocess.Popen(
-                [sys.executable, "-X", "utf8", "-m", "recog.environment", str(root), service.python, kind,
+                [sys.executable, "-X", "utf8", str(LAUNCHER), "recog.environment", str(root), service.python, kind,
                  str(service.overlay_path) if service.overlay_path is not None else ""],
-                cwd=Path(__file__).resolve().parents[1], stdout=log, stderr=log,
+                cwd=PLUGIN_ROOT, env=child_env(), stdout=log, stderr=log,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
     except OSError as exc:
         atomic_json(path, {"state": "failed", "kind": kind, "error": str(exc)})
         raise
+    # 启动即死（解释器找不到 recog、Python 版本不兼容等）原先会留下 state=running，
+    # 前端于是永远「检测中…」，父进程也无从知道。这里短暂探活，把退出码和日志尾巴
+    # 变成可见的失败原因。
+    try:
+        exit_code = process.wait(timeout=0.8)
+    except subprocess.TimeoutExpired:
+        exit_code = None
+    if exit_code not in (None, 0):
+        error = f"安装控制器启动后立即退出（退出码 {exit_code}）：{log_tail(root / 'environment.log')}"
+        atomic_json(path, {"state": "failed", "kind": kind, "error": error})
+        raise ValueError(error)
     service.environment_process = process
     service.environment_cache = None
     return {"state": "running", "pid": process.pid}
@@ -363,11 +409,11 @@ def _install(root: Path, python: str, kind: str, overlay: Path | None = None) ->
             run_installer([uv, "pip", "install", "--no-config", "--python", python, *destination,
                            *PINNED_PACKAGES, *reinstall], update)
             update(phase="verify", percent=None)
-            command = [python, "-X", "utf8"]
+            command = [python, "-X", "utf8", str(LAUNCHER)]
             if stage is not None:
-                command.extend(["-m", "recog.bootstrap", str(stage)])
-            probe = subprocess.run([*command, "-m", "recog.probes", "environment_status"], cwd=Path(__file__).resolve().parents[1],
-                                   capture_output=True, text=True, encoding="utf-8", check=True)
+                command.extend(["--overlay", str(stage)])
+            probe = subprocess.run([*command, "recog.probes", "environment_status"], cwd=PLUGIN_ROOT,
+                                   env=child_env(), capture_output=True, text=True, encoding="utf-8", check=True)
             verified = json.loads(probe.stdout)
             print(json.dumps(verified, ensure_ascii=False), flush=True)
             if not verified["installed"]:

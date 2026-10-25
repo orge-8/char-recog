@@ -1,5 +1,146 @@
 # 更新日志
 
+## 0.6.4 · 2026-10-25（embeddable 解释器忽略 PYTHONPATH：子进程改按文件路径自举）
+
+**现象**：0.6.3 的日志首行已经把现场写清楚了 —— 路径全对、`recog/environment.py`
+确实存在（preflight 通过），却依旧 `No module named 'recog'`：
+
+```
+[launch] python=E:\mai\maibot\.onekey\environments\<uuid>\python.exe
+         plugin_root=E:\mai\maibot\plugins\char-recog
+         pythonpath=E:\mai\maibot\plugins\char-recog
+```
+
+同时「环境 · 检测中」「版本 检测中…」「实际来源 检测中…」永远不结束 —— 环境探针
+`-m recog.probes` 撞的是同一堵墙。
+
+**根因**：`.onekey/environments/<uuid>/python.exe` 是 Windows **embeddable** 发行版。
+目录里一旦存在 `python*._pth`，Python 就会**忽略 PYTHONPATH**、也**不把 cwd 放进
+`sys.path`**（等效于 -E -s）。因此 `python -m recog.x` 在解释器启动阶段就解析失败：
+0.6.3 补的 PYTHONPATH 与 cwd 全部无效，preflight 也拦不住（文件确实存在）。
+
+**修法**：不再让解释器去解析模块名，改为按**文件路径**启动 `recog/launcher.py` ——
+脚本自身使 `sys.path[0]` 落在 `recog/`，再把插件根显式 `insert` 进去，自举与任何环境
+变量配置彻底解耦。overlay 的优先级语义从 `bootstrap.py` 抽成 `activate()` 由 launcher
+调用，顺序仍是「overlay → 插件根 → 其余」。
+
+### 修复
+
+- 新增 `recog/launcher.py`：
+  `python -X utf8 <插件根>/recog/launcher.py [--overlay <目录>] <模块> [参数...]`。
+- 四条启动链统一改走 launcher：安装控制器（`recog.environment`）、训练/推理 worker
+  （`recog.worker`）、环境探针（`recog.probes`）、解释器探针（`recog.probes`）。
+- `Service.runtime_command` 的 overlay 表达由 `-m recog.bootstrap <目录>` 改为
+  `--overlay <目录>`；`bootstrap.py` 抽出 `activate(overlay)`，旧的 `-m recog.bootstrap`
+  入口保留兼容。
+
+### 防护
+
+- `tests/test_child_env.py` 扩到 5 条：新增「全仓禁止 `-m recog.*` 命令字面量」（AST 扫描
+  list/tuple 中同时出现 `-m` 与 `recog.` 的元素）与「launcher 必须存在且显式插入插件根」。
+  反向验证：把 `_spawn` 改回 `-m recog.worker` → 门禁 FAIL 并报出行号。
+- `SUBPROCESS_GRAPH` 与安全审计的文件清单纳入 `recog/launcher.py`。
+- 本地沙箱实测：`cd C:\` + `PYTHONPATH` 置空 + 走 launcher → `recog.probes` 正常输出；
+  同一条件下 `-m recog.environment` 逐字复现真机报错。
+
+### 测试
+
+0.6.0 口径 248 collected（0.6.3 的 246 + 本版新增 2）。
+
+## 0.6.3 · 2026-10-25（安装控制器起不来：`-m recog.*` 只靠 cwd 找包）
+
+**现象**：「运行环境」页点「安装 PyTorch (CPU)」后任务永远停在「处理中」，版本、
+实际来源、依赖状态永远「检测中…」，日志只有一行：
+
+```
+E:\mai\maibot\.onekey\environments\<uuid>\python.exe: Error while finding module
+specification for 'recog.environment' (ModuleNotFoundError: No module named 'recog')
+```
+
+**根因**：安装控制器靠 `python -m recog.environment` 启动，而 `-m` 能否解析出这个包
+**只**取决于 `sys.path` 里有没有插件根。原实现把这件事单独托付给
+`Popen(cwd=Path(__file__).resolve().parents[1])` —— 一个隐含前提。cwd 一旦不是插件根，
+子进程在解释器启动阶段就退出：没有 traceback，父进程也无从感知，状态文件一直停在
+`running`，前端于是永远「检测中」。
+
+本地复现（在任意不含 `recog/` 的目录执行）：
+
+```
+$ cd C:\ && python -X utf8 -m recog.environment
+python.exe: Error while finding module specification for 'recog.environment'
+(ModuleNotFoundError: No module named 'recog')
+```
+
+与真机日志逐字一致；同一命令补上 `PYTHONPATH=<插件根>` 即可正常加载。
+
+### 修复
+
+- **三条子进程启动链都显式带 `PYTHONPATH=插件根`**：`environment.launch`（安装控制器）、
+  `service._spawn`（训练/推理 worker）、`dependency_download.wheel_urls`（解释器探针）。
+  自举不再依赖 cwd 这一隐含前提；原有 `PYTHONPATH` 叠加而非覆盖，overlay 的优先级仍由
+  `recog.bootstrap` 保证，不受影响。
+- **启动即死不再沉默**：`launch` 在 spawn 后 0.8 秒探活，退出码非 0 就把日志尾部写进
+  `environment-status.json` 并抛错 —— 前端立刻显示失败原因，不再无限「检测中」。
+- **preflight**：启动前确认 `<插件根>/recog/environment.py` 存在，缺失时把具体路径写进错误。
+- **日志首行固定记录现场**：`[launch] python=… plugin_root=… pythonpath=…`，之后再遇到
+  路径类故障可一眼判定。
+
+### 防护
+
+- 新增 `tests/test_child_env.py`（3 条）：AST 断言三处子进程启动都带 `env=`；
+  `child_env()` 的插件根必须是 `PYTHONPATH` 第一项且保留原值；`log_tail` 的降级行为。
+  反向验证：删掉 `_spawn` 的 `env=` → 门禁 FAIL 并报出具体文件与行号。
+
+### 测试
+
+0.6.0 口径 246 collected（0.6.2 的 243 + 本版新增 3）。
+
+## 0.6.2 · 2026-10-25（WebUI 六个页面全白：模板字符串被改坏，整块脚本不解析）
+
+**现象**：0.6.1 之后，角色识别的每一个自定义页面都停在静态空壳上 —— 角色下拉框空白、
+右上是「模型状态加载中 / 环境检测中」、图库一直转圈、页脚「等待首次加载」。服务端
+日志干净，那些页面绑定的 API 一个都没被调用。
+
+**根因**：0.6.1 删掉「内容类型」提示（`data.form.coverage_text` 那段）时，把外层
+模板字符串的闭合一起带走了 —— 残留 `</p>` 与 `` ` : ""} `` 两处碎片：
+
+```js
+... : ''}</p>` : ""}${data.form.eval_groups ? ...
+```
+
+`<script type="module">` 在**解析阶段**就抛 `SyntaxError: Unexpected token ':'`，
+一行 JS 都不执行。模块脚本的解析失败不触发 DOM 事件，也进不了页面里的任何 `catch`，
+所以插件侧完全无感；静态 HTML 又是由 `build.py` 预置好的，外壳照常显示 —— 于是表现成
+「页面在、数据全没有」。
+
+定位方式：逐版本 `git show` 出 `webui/index.html`、抽出 module 脚本跑 `node --check`。
+0.5.20（`351e1eb`）通过，0.6.1（`dfd4fdd`）首次失败，确认由该版引入。
+
+### 修复
+
+- **`webui/index.html` 就绪度模板补回结构**：删掉 `</p>` 与 `` ` : ""} `` 两处残留，
+  `renderTraining` 里的 `${}` 嵌套恢复平衡；`data.form.coverage_text` 的展示按 0.6.1
+  的意图保持移除。
+- **页面初始化失败不再静默**：原先 `await maibot.ready` 没有超时也没有兜底，宿主不注入
+  SDK、或握手不完成时，页面同样是「空壳且零提示」。现在 `boot()` 先显式检查
+  `window.maibot`，`ready` 8 秒未完成即超时，两种情况都把原因以红色 banner 写到页面
+  顶部（并继续抛出，F12 可见完整堆栈）。
+
+### 防护
+
+- **新增 `tests/test_webui_scripts.py`（8 条）**：对 7 个页面逐一跑 `node --check`；并
+  要求 `webui/*.html` 与「用当前 `index.html` 重跑 `build.py`」的结果逐字节一致。
+  这正面补上了既有门禁的盲区 —— 此前 30 个测试文件全部只审 Python 侧，没有任何一条
+  读过 HTML 里的脚本，0.6.1 的语法错误因此一路通过全检。
+- **反向验证**：把 `webui/index.html` 换回 `dfd4fdd` 版本 → 语法门禁 1 条 FAIL、同步
+  门禁 FAIL；只改 `index.html` 不重跑 build → 同步门禁 FAIL。两条门禁都能被真实缺陷
+  触发，不是摆设。
+- **未装 node 时用例 skip 并打印原因**（不静默通过），避免在无 node 的 CI 上出现假绿。
+
+### 测试
+
+0.6.0 口径 243 collected（0.6.1 的 235 + 本版新增 8）。
+
 ## 0.6.1 · 2026-10-25（上线前全检修复：聊天捕获失效 / RCE / 迁移原子性 / 门禁假绿）
 
 一次上线前全检（产品评审 + OWASP/STRIDE 安全审计 + QA 门禁）查出 6 个阻塞项，

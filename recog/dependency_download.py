@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 import hashlib
 import html
 import json
+import os
 import re
 import subprocess
 import time
@@ -13,9 +14,12 @@ import time
 
 def wheel_urls(python: str, build: str) -> list[tuple[str, str]]:
     package_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    # 与 environment.launch / service._spawn 保持一致：按文件路径自举，不靠 cwd。
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(package_root), env.get("PYTHONPATH")]))
     result = subprocess.run(
-        [python, "-m", "recog.probes", "interpreter_info"],
-        capture_output=True, text=True, check=True, timeout=15, cwd=package_root,
+        [python, "-X", "utf8", str(package_root / "recog" / "launcher.py"), "recog.probes", "interpreter_info"],
+        capture_output=True, text=True, check=True, timeout=15, cwd=package_root, env=env,
     )
     version, system, machine = json.loads(result.stdout)
     tag = f"cp{version[0]}{version[1]}"

@@ -1,6 +1,6 @@
 [project]
 name = "char-recog-worker"
-version = "0.6.1"
+version = "0.6.4"
 requires-python = ">=3.11"
 dependencies = ["torch>=2.6,<3", "torchvision>=0.21,<1", "Pillow>=11,<14", "numpy>=2,<3", "psutil>=6,<8"]
 

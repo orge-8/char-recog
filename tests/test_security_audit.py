@@ -575,6 +575,7 @@ def test_B6_no_http_client_library_is_used_at_all():
             "recog/images.py",
             "recog/scores.py",
             "recog/bootstrap.py",
+            "recog/launcher.py",
             "recog/probes.py",
             "recog/processes.py",
         )
@@ -956,6 +957,7 @@ def test_D6_subprocess_argv_are_lists_not_strings():
         "recog/environment.py",
         "recog/dependency_download.py",
         "recog/bootstrap.py",
+        "recog/launcher.py",
     ):
         for tree, node in _subprocess_sites(relative):
             sites += 1
@@ -1073,6 +1075,7 @@ def test_E1_no_hardcoded_secrets():
             "recog/scores.py",
             "recog/images.py",
             "recog/bootstrap.py",
+            "recog/launcher.py",
         )
     }
     offenders = []

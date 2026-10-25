@@ -6,15 +6,22 @@ import site
 import sys
 
 
-def main() -> None:
-    overlay = str(Path(sys.argv[1]).resolve())
-    # Process .pth files as a normal site directory, then give its packages
-    # priority. This happens only in this child, never in the host/Runner.
+def activate(overlay: Path) -> None:
+    """Give an overlay directory priority over the base interpreter's packages.
+
+    Process .pth files as a normal site directory, then move its packages to the
+    front. This happens only in the child, never in the host/Runner.
+    """
+    overlay = str(overlay.resolve())
     before = list(sys.path)
     sys.path.insert(0, overlay)
     site.addsitedir(overlay)
     added = [path for path in sys.path if path not in before and path != overlay]
     sys.path[:] = [overlay, *added, *[path for path in before if path != overlay]]
+
+
+def main() -> None:
+    activate(Path(sys.argv[1]))
     mode, target, *args = sys.argv[2:]
     sys.argv = [target, *args]
     if mode == "-m":

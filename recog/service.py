@@ -18,6 +18,9 @@ from .store import Store, atomic_json, digest
 from .processes import process_alive
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+# 子进程一律按文件路径自举：embeddable 解释器有 `python*._pth` 时会忽略
+# PYTHONPATH 与 cwd，`-m recog.*` 在启动阶段就失败（详见 recog/launcher.py）。
+LAUNCHER = PACKAGE_ROOT / "recog" / "launcher.py"
 _LOG = logging.getLogger("char-recog")
 
 # Inference lifecycle tuning. Long budgets belong to the background warm-up thread
@@ -109,11 +112,18 @@ class Service:
         )
 
     def runtime_command(self, *args: str, overlay: Path | None = None) -> list[str]:
-        command = [self.python, "-X", "utf8", "-u"]
         target = self.overlay_path if overlay is None else overlay
+        command = [self.python, "-X", "utf8", "-u", str(LAUNCHER)]
         if target is not None:
-            command.extend(["-m", "recog.bootstrap", str(target)])
+            command.extend(["--overlay", str(target)])
         return [*command, *args]
+
+    def child_env(self) -> dict:
+        """Explicit plugin root on PYTHONPATH: `-m recog.*` must not depend on cwd alone."""
+        env = dict(os.environ)
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = os.pathsep.join([str(PACKAGE_ROOT), *([existing] if existing else [])])
+        return env
 
     def _spawn(self, operation: str, job: str = "", pipe: bool = False):
         self.check_environment_idle()
@@ -122,7 +132,7 @@ class Service:
                 "插件训练环境尚未安装，请在插件目录执行 uv venv .venv 与 uv pip install --python .venv -r requirements-worker.txt"
             )
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        command = self.runtime_command("-m", "recog.worker", operation, str(self.store.root))
+        command = self.runtime_command("recog.worker", operation, str(self.store.root))
         if job:
             command.append(job)
         if pipe:
@@ -131,6 +141,7 @@ class Service:
                 return subprocess.Popen(
                     command,
                     cwd=PACKAGE_ROOT,
+                    env=self.child_env(),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=stderr,
@@ -142,7 +153,7 @@ class Service:
                 stderr.close()
         log = open(self.store.root / "jobs" / job / "worker.log", "a", encoding="utf-8")
         try:
-            return subprocess.Popen(command, cwd=PACKAGE_ROOT, stdout=log, stderr=log, creationflags=flags)
+            return subprocess.Popen(command, cwd=PACKAGE_ROOT, env=self.child_env(), stdout=log, stderr=log, creationflags=flags)
         finally:
             log.close()
 

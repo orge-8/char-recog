@@ -27,7 +27,9 @@ def test_custom_environment_is_read_only_and_survives_reload(tmp_path):
     service.configure_python()
     try:
         assert service.overlay_path is None
-        assert service.runtime_command("-c", "pass") == [sys.executable, "-X", "utf8", "-u", "-c", "pass"]
+        assert service.runtime_command("recog.probes", "environment_status") == [
+            sys.executable, "-X", "utf8", "-u", str(environment.LAUNCHER), "recog.probes", "environment_status"
+        ]
         info = environment.describe(service, {"installed": True, "torch": "test"})
         assert not info["managed"] and not info["can_manage"]
         assert info["mode_text"] == "自定义环境"
@@ -84,7 +86,7 @@ def test_overlay_precedence_and_base_fallback(tmp_path):
         (service.overlay_path / "extra.pth").write_text("extra\nimport overlay_sample\n", encoding="utf-8")
         env = {**os.environ, "PYTHONPATH": str(base)}
         result = subprocess.run(
-            service.runtime_command("-m", "recog.probes", "overlay_import", "overlay_sample", "base_only_sample", "pth_sample"),
+            service.runtime_command("recog.probes", "overlay_import", "overlay_sample", "base_only_sample", "pth_sample"),
             cwd=PACKAGE_ROOT, env=env, capture_output=True, text=True, check=True,
         )
         assert json.loads(result.stdout) == ["overlay", "inherited", "pth"]
@@ -115,7 +117,7 @@ def test_target_install_and_uninstall_never_modify_base(tmp_path, monkeypatch, k
                 (stage / name).mkdir(exist_ok=True)
                 (stage / name / "__init__.py").write_text("# installed", encoding="utf-8")
             return SimpleNamespace(returncode=0)
-        stage = Path(command[command.index("recog.bootstrap") + 1])
+        stage = Path(command[command.index("--overlay") + 1])
         return SimpleNamespace(returncode=0, stdout=json.dumps({"installed": True, "cuda": kind == "gpu", "torch": "2.11.0", "torchvision": "0.26.0",
             "torch_path": str(stage / "torch/__init__.py"), "torchvision_path": str(stage / "torchvision/__init__.py")}), stderr="")
 
