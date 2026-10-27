@@ -1,5 +1,60 @@
 # 更新日志
 
+## 0.7.0 · 2026-10-27（动图支持：GIF / APNG / 动态 WebP 统一取首帧）
+
+**背景**：此前解码层先数帧、`n_frames != 1` 直接拒收，真实图库里 32.3% 的图片进不了库，
+其中绝大多数是扩展名伪装成 `.jpg` 的动图 GIF（实测 583 个 GIF 里 551 个顶着 `.jpg`）。
+QQ 聊天的动图主要走表情包通道（NapCat 把 `sub_type=1` 映射成 `emoji`），插件本来收得到，
+只卡在解码这一层。
+
+**决策依据**：`docs/decisions-animated-images.md`（D7 格式边界、D14 首帧与多帧实测、
+D19 在线只取首帧、D20 原始字节去重、D21 审核页不播动图、D22 宿主压缩边界、D23 工具文案）。
+
+### 新增
+
+- 支持 GIF（含 APNG、动态 WebP）。**统一取第一帧**：识别、训练、缩略图、指纹都只看首帧。
+  依据是 509 张真实动图的实测——首帧与 5 帧中位数的判定只差 11 张（2.2%），
+  而「任一帧过线」会把负例误报从 32 张抬到 52 张。
+- `recog/images.py` 新增 `decode_with_animation()` 与 `DECODE_VERSION`；`decode()` 保持在线语义
+  （只解首帧、不读 `n_frames`、不扫后续帧），入库路径才需要动画标识。
+- `plugin.py` 新增 `MAX_FORWARD_DEPTH=3`：合并转发最多下钻 3 层，深处的图片不再送 worker，
+  恶意深嵌套不再把 `RecursionError` 抛在 6 秒预算里。
+
+### 变更
+
+- 格式白名单从 `JPEG/PNG/WEBP` 扩到 `JPEG/PNG/WebP/GIF`；拒收文案不再提「动图」，
+  只报实际探测到的容器格式。
+- 动图入库时 `decoded` 指纹写为 `animated:<原始sha>`：像素指纹只覆盖首帧，
+  两张「首帧相同、后续帧不同」的动图会算成同一张，直接拿它精确去重会把真变体删掉。
+  原始文件逐字节保留，`pHash` 不变，模糊合并照旧走 `similar()`。
+- `plugin.py` 的识别缓存 key 并入 `DECODE_VERSION`：解码语义一变，旧判定不再被复用。
+
+### 修复
+
+- 工具 `recognize_character_image` 的描述去掉「（中V）」——插件 0.3.0 起就不再限定中V，
+  这个括号会把调用方误导成「只能认中V角色」。同时补上覆盖范围：
+  「识别消息中的图片包含哪些角色（仅覆盖已启用模型的角色）」。否则模型会把
+  「这个角色没配模型」误报成「不是这个角色」（D23）。
+
+### 防护
+
+- 新增 `tests/test_animated_images.py`（14 条）：GIF/APNG/动态 WebP 首帧断言、
+  `is_animated` 与 `n_frames > 1` 等价性、单帧 GIF 不算动图、伪装扩展名按内容识别、
+  `MAX_PIXELS` 在解码前生效、原始字节逐字节保留、首帧相同但后续帧不同的两张都保留、
+  同字节仍判重、聊天动图以 `label=NULL` 进审核队列、损坏动图不进库。
+- `tests/test_annotation_policy.py` 新增 4 条：`DECODE_VERSION` 进缓存 key、
+  `emoji` 段 GIF 既出提示也进捕获、forward 3 层照常识别且第 4 层起不下钻（含 60 层深嵌套）。
+- `tests/test_security_audit.py` 的 F2/F3 改为「容器白名单 + 首帧语义」：允许集合含 GIF、
+  源码不再出现帧数硬拒、`seek(0)` 必须在 `load()` 之前；BMP/SVG/截断文件仍被拒。
+- 含 torch 环境下 266 collected（口径：`tests/` 去掉 `test_security_audit.py` 与 `test_release_gate.py`）。
+
+### 已知边界（不修，写进 README）
+
+- 宿主 WebUI 上传仍只收静态图（1.3.14/1.3.15 均如此），动图只能从聊天进来。
+- 宿主在 Hook 之前会把 >16 MB 的图片压成首帧 JPEG：≤12 MB 按动图识别；12–16 MB 可能
+  整条钩子被跳过；>16 MB 压缩成功时按静态首帧处理，压缩失败插件看不到。
+- 审核页只显示首帧静态缩略图，不播动图；多帧在线聚合、多帧训练、MP4/WebM 不在本版范围。
+
 ## 0.6.4 · 2026-10-25（embeddable 解释器忽略 PYTHONPATH：子进程改按文件路径自举）
 
 **现象**：0.6.3 的日志首行已经把现场写清楚了 —— 路径全对、`recog/environment.py`

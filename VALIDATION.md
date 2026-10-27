@@ -335,3 +335,45 @@ python scripts/check_submission.py . --plugin-id org.civetc.char-recog
 - 固定评估集：批次整批归边、稀有类型优先、每类预留 20 组训练、重跑成员不变。
 - 分档指标与建议文案：`n < 5` 标记样本不足，不输出百分比（`tests/test_style_metrics.py`）。
 - 宿主 WebUI 限额：页面数、每页 action/query 上限、参数数、`uploads` 绑定、页面体积（`tests/test_webui_host_limits.py`）。
+
+## 2026-10-27 · 0.7.0 动图首帧支持
+
+环境：Windows 10、`char-recog-py312`（Python 3.12 / torch 2.14.1+cpu / Pillow 12.3.0 / pytest 9.1.1）。
+
+### 自动门禁
+
+`pytest tests` → **443 passed / 3 skipped（161s）**，退出码 0。跳过的是既有的三条「无 CUDA / 依赖环境」用例，与本版无关。
+
+口径内收集数（`tests/` 去掉 `test_security_audit.py` 与 `test_release_gate.py`）= **266 collected**，与 CHANGELOG 0.7.0 自述一致。
+
+新增覆盖：
+
+| 文件 | 条数 | 覆盖点 |
+|---|---:|---|
+| `tests/test_animated_images.py` | 14 | GIF/APNG/动态 WebP 首帧、`is_animated` 与 `n_frames > 1` 等价、单帧 GIF 不算动图、伪装扩展名、`MAX_PIXELS` 先于解码、原始字节保留、同首帧不同后续帧都保留、同字节判重、聊天捕获 `label=NULL`、损坏动图不入库 |
+| `tests/test_annotation_policy.py` | +4 | `DECODE_VERSION` 进缓存 key、`emoji` 段 GIF 既出提示也进捕获、forward 3 层识别 / 4 层停止 / 60 层不抛 `RecursionError` |
+| `tests/test_security_audit.py` | 改 3 | F2 改「容器白名单 + `seek(0)` 在 `load()` 前」、F3 改「GIF 可解，BMP/SVG/截断仍拒」、A9 跟随 `decode_with_animation` |
+| `tests/test_catalog.py` | 改 3 | 静态格式参数化并入 GIF、移除「GIF 必报错」、动图首帧像素断言 |
+
+### 509 张离线回放
+
+模型 `char-exp/runs/goodmodel/jobs/02623341426c4da6baa3fad9b884b1d7/selected.pt`（洛天依，input_size 320），语料 `Desktop/Ori` + `Desktop/Thumb` 按**字节内容**识别格式（扩展名不可信），标签沿用训练快照反推出的目录约定（`lty` / `lty1` / `洛天依` / `洛天依1` / `洛天依2` = 正例，其余目录 = 负例）。
+
+| 项 | 本次 | D14 基线（2026-10-25） |
+|---|---:|---:|
+| 动图张数 | 510（正 157 / 负 353） | 509（正 157 / 负 352） |
+| 首帧 AUC | 0.8694 | 0.871 |
+| F1 @0.6 | 0.7393（P 0.7671 / R 0.7134） | 0.742 |
+| 单帧 GIF（不计入） | 73 | 73 |
+
+差值归因：语料比建档时多一张负例（2355 文件 / 583 GIF，D10 记的是 2353 / 582）。逐张剔除验证——把 353 张负例任取一张删掉重算，恰好有 3 个候选给出 AUC 0.871、F1 0.7417（四舍五入 0.742），即基线可复现，差额 100% 由这一张解释，不是解码或推理路径变化。
+
+### 安全边界（自动）
+
+- >20 MiB、>4000 万像素在 `load()` 之前被拒；`DecompressionBombWarning` 仍升级为错误。
+- BMP / SVG / 截断 GIF 仍抛异常且不写库；GIF 不再出现在拒收集合里。
+
+### 未纳入自动门禁（人工项）
+
+- 真机（宿主 1.3.15）发一张 ≤12 MB 动图表情包，确认提示出现；再发 >16 MB GIF，确认按静态首帧处理且不崩。
+- WebUI 上传 GIF 仍被宿主拒绝（预期行为，见 D8）。

@@ -29,9 +29,12 @@ from .recog.scores import (
     suggest_threshold,
     sweep,
 )
-from .recog.images import MAX_BASE64_BYTES
+from .recog.images import DECODE_VERSION, MAX_BASE64_BYTES
 
 DEFAULT_CHARACTERS = ["洛天依", "言和", "乐正绫", "乐正龙牙", "徵羽摩柯", "墨清弦", "星尘", "心华"]
+# 合并转发最多下钻 3 层。宿主序列化/反序列化也会递归，插件侧只能防住自己的栈；
+# 不设上限时一条刻意构造的深嵌套转发会让 visit() 先把 RecursionError 抛在 6s 预算里。
+MAX_FORWARD_DEPTH = 3
 _LOG = logging.getLogger("char-recog")
 
 
@@ -106,13 +109,17 @@ class CharacterRecognition(MaiBotPlugin):
         limits_key = tuple(sorted(limits.items()))
         deadline = time.monotonic() + 6
 
-        async def visit(parts):
+        async def visit(parts, depth=0):
             result = []
             for part in parts:
                 if part.get("type") == "forward":
+                    if depth >= MAX_FORWARD_DEPTH:
+                        # 到顶就原样保留，不再下钻：深处的图片不送 worker，也不改动消息结构。
+                        result.append(part)
+                        continue
                     nodes = []
                     for node in part.get("data", []):
-                        nodes.append({**node, "content": await visit(node.get("content", []))})
+                        nodes.append({**node, "content": await visit(node.get("content", []), depth + 1)})
                     result.append({**part, "data": nodes})
                     continue
                 result.append(part)
@@ -123,7 +130,9 @@ class CharacterRecognition(MaiBotPlugin):
                     continue
                 try:
                     raw = base64.b64decode(binary, validate=True)
-                    key = (hashlib.sha256(raw).hexdigest(), versions_key, limits_key)
+                    # DECODE_VERSION 在 key 里：解码语义一变（0.7.0 起动图不再拒收、
+                    # 统一取首帧），同一份字节解出来的张量就不是同一个东西了，旧缓存必须作废。
+                    key = (hashlib.sha256(raw).hexdigest(), versions_key, limits_key, DECODE_VERSION)
                     prediction = self._image_cache.get(key)
                     if prediction is None:
                         # wait=False: a cold or cooling worker never blocks the chat
@@ -921,7 +930,7 @@ class CharacterRecognition(MaiBotPlugin):
 
     @Tool(
         "recognize_character_image",
-        description="识别消息中的图片包含哪些（中V）角色；可指定单个角色，缺省返回全部已启用角色的得分。",
+        description="识别消息中的图片包含哪些角色（仅覆盖已启用模型的角色）；可指定单个角色，缺省返回全部已启用角色的得分。",
         parameters=[
             ToolParameterInfo(
                 name="message_id", param_type=ToolParamType.STRING, description="当前聊天中的真实消息ID", required=True

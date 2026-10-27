@@ -20,14 +20,28 @@ MAX_BASE64_BYTES = MAX_BYTES * 4 // 3
 MAX_PIXELS = 40_000_000
 # 与 store.freeze 允许的输入尺寸保持一致；解码时按它 draft，避免二次放大。
 MAX_EDGE = 448
+# 图像语义版本。只要「同一份字节解出来的张量」发生变化（例如从「动图直接拒收」
+# 改成「取首帧」），就必须递增：plugin.py 的识别缓存与库里的 decoded 指纹都以它
+# 为前提，不递增会让旧语义下的判定被继续复用。
+DECODE_VERSION = 1
+# APNG 的容器格式仍是 PNG，动态 WebP 的仍是 WEBP，所以这里是容器白名单而不是动画白名单。
+SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
 
 
-def decode(raw: bytes, draft_edge: int | None = None) -> Image.Image:
-    """Decode to RGB. `draft_edge` lets libjpeg decode a JPEG at a reduced scale.
+def _decode(raw: bytes, draft_edge: int | None = None) -> tuple[Image.Image, bool]:
+    """Decode to RGB and report whether the source is animated.
 
-    Drafting skips the full-size IDCT and upsampling (12MP to 320 input drops from
-    ~302 ms to ~25 ms end to end) but keeps the original pixels' geometry. Only
-    JPEG honours it; other formats decode normally.
+    `draft_edge` lets libjpeg decode a JPEG at a reduced scale. Drafting skips the
+    full-size IDCT and upsampling (12MP to 320 input drops from ~302 ms to ~25 ms
+    end to end) but keeps the original pixels' geometry. Only JPEG honours it;
+    other formats decode normally.
+
+    Animation is handled by `seek(0)`: every caller gets the first frame. This is a
+    deliberate semantic, not a limitation — 509 animated illustrations measured on
+    0.6.x showed the first frame and a 5-frame median differ in verdict on only
+    11/509 (2.2%), while "any frame above the gate" raised false positives from 32
+    to 52. Reading `is_animated` costs ~0.14 ms on a real GIF and does not scan
+    frames, so the online path never pays for frames it will not use.
     """
     if not raw or len(raw) > MAX_BYTES:
         raise ValueError("文件为空或超过20MiB")
@@ -38,24 +52,35 @@ def decode(raw: bytes, draft_edge: int | None = None) -> Image.Image:
                 # Name what was actually detected: a survey of a real library found
                 # 32% of files rejected here, mostly animated GIFs renamed to .jpg,
                 # and "仅支持JPEG/PNG/静态WebP" left the admin unable to tell why.
-                # Frame count first: "this is an animation" is the more useful fact.
-                frames = getattr(source, "n_frames", 1)
-                if frames != 1:
-                    raise ValueError(f"检测到动图（{frames} 帧），请上传静态图片")
-                if source.format not in {"JPEG", "PNG", "WEBP"}:
-                    raise ValueError(f"实际格式为 {source.format or '未知'}，仅支持 JPEG/PNG/静态 WebP")
+                if source.format not in SUPPORTED_FORMATS:
+                    raise ValueError(
+                        f"实际格式为 {source.format or '未知'}，仅支持 JPEG/PNG/WebP/GIF"
+                    )
                 # Original dimensions, read before draft: draft() rewrites size
                 # immediately, so checking afterwards would let an oversized JPEG
                 # through the pixel guard.
                 width, height = source.size
                 if width * height > MAX_PIXELS:
                     raise ValueError("解码超过4000万像素")
+                animated = bool(getattr(source, "is_animated", False))
                 if draft_edge and source.format == "JPEG":
                     source.draft("RGB", (draft_edge, draft_edge))
+                source.seek(0)
                 source.load()
-                return ImageOps.exif_transpose(source).convert("RGB")
+                return ImageOps.exif_transpose(source).convert("RGB"), animated
     except (Image.DecompressionBombWarning, Image.DecompressionBombError) as exc:
         raise ValueError("图片解码尺寸超限") from exc
+
+
+def decode(raw: bytes, draft_edge: int | None = None) -> Image.Image:
+    """First frame only — the online and training path both use this."""
+    return _decode(raw, draft_edge)[0]
+
+
+def decode_with_animation(raw: bytes, draft_edge: int | None = None) -> tuple[Image.Image, bool]:
+    """Same decode, plus the animation flag. Only `Store.ingest` needs the flag:
+    it decides whether the row's exact-duplicate fingerprint may key on pixels."""
+    return _decode(raw, draft_edge)
 
 
 def whole_image(image: Image.Image, edge: int = 320) -> Image.Image:

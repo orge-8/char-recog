@@ -26,7 +26,7 @@ spec.loader.exec_module(module)
 CHAR = "洛天依"
 
 
-def build(results, limits=None, seen=None):
+def build(results, limits=None, seen=None, **config):
     """A plugin whose worker always returns the same scores."""
     seen = seen if seen is not None else []
     characters = sorted({item["character"] for item in results}) or [CHAR]
@@ -37,7 +37,7 @@ def build(results, limits=None, seen=None):
         return {"status": "ok", "results": [dict(item) for item in results]}
 
     plugin = module.create_plugin()
-    plugin._plugin_config_instance = module.Config(characters=characters)
+    plugin._plugin_config_instance = module.Config(characters=characters, **config)
     plugin._image_cache = {}
     plugin.service = SimpleNamespace(
         store=SimpleNamespace(
@@ -56,6 +56,43 @@ def annotate(plugin, data=b"picture"):
     message = {"raw_message": [{"type": "image", "binary_data_base64": base64.b64encode(data).decode()}]}
     parts = asyncio.run(plugin.annotate_received_images(message))["modified_kwargs"]["message"]["raw_message"]
     return [part["data"] for part in parts if part["type"] == "text"]
+
+
+def gif_bytes(frames=4):
+    import io
+    import numpy as np
+    from PIL import Image
+
+    images = [
+        Image.fromarray(np.random.default_rng(seed).integers(0, 256, (48, 64, 3), dtype=np.uint8))
+        for seed in range(frames)
+    ]
+    buffer = io.BytesIO()
+    images[0].save(buffer, format="GIF", save_all=True, append_images=images[1:], duration=100, loop=0)
+    return buffer.getvalue()
+
+
+def forwarded(levels, data=b"picture"):
+    """`levels` 层 forward 包住一张图；第 1 层的图片离消息根最近。"""
+    content = [{"type": "image", "binary_data_base64": base64.b64encode(data).decode()}]
+    for _ in range(levels):
+        content = [{"type": "forward", "data": [{"content": content}]}]
+    return {"raw_message": content}
+
+
+def texts_of(parts):
+    found = []
+
+    def walk(items):
+        for part in items:
+            if part.get("type") == "text":
+                found.append(part["data"])
+            elif part.get("type") == "forward":
+                for node in part.get("data", []):
+                    walk(node.get("content", []))
+
+    walk(parts)
+    return found
 
 
 def hit(character, score):
@@ -113,6 +150,46 @@ def test_changing_a_gate_invalidates_the_prediction_cache():
     state["limits"][CHAR] = 0.9
     assert annotate(plugin) == []
     assert len(seen) == 2
+
+
+def test_changing_the_decode_version_invalidates_the_prediction_cache(monkeypatch):
+    """解码语义一变，同一份字节解出来的张量就不是同一个东西了（D19/0.7.0）。"""
+    plugin, seen, _ = build([hit(CHAR, 0.7)], {CHAR: 0.6})
+    assert len(annotate(plugin)) == 1 and len(seen) == 1
+    # 同图、同版本、同阈值 -> 命中缓存，不再进 worker
+    assert len(annotate(plugin)) == 1 and len(seen) == 1
+    monkeypatch.setattr(module, "DECODE_VERSION", module.DECODE_VERSION + 1)
+    assert len(annotate(plugin)) == 1 and len(seen) == 2
+
+
+def test_emoji_animation_prompts_and_triggers_capture():
+    """表情包通道是 QQ 动图的主路径（D16）：GIF 表情既出提示也进捕获队列。"""
+    raw = gif_bytes()
+    plugin, seen, _ = build([hit(CHAR, 0.7)], {CHAR: 0.6}, chat_capture=True)
+    captured = []
+    # 捕获走线程池；这里只验证「有没有被排进捕获」，不验证入库。
+    plugin._schedule_capture = lambda data, results: captured.append(data)
+    message = {"raw_message": [{"type": "emoji", "binary_data_base64": base64.b64encode(raw).decode()}]}
+    parts = asyncio.run(plugin.annotate_received_images(message))["modified_kwargs"]["message"]["raw_message"]
+    assert len(texts_of(parts)) == 1 and CHAR in texts_of(parts)[0]
+    assert seen == [raw], "表情包必须原样交给 worker（首帧在解码层统一取）"
+    assert captured == [raw]
+
+
+def test_forward_nesting_stops_at_three_levels():
+    """forward 深度上限：3 层以内照常识别，第 4 层起不再下钻（也不抛 RecursionError）。"""
+    plugin, seen, _ = build([hit(CHAR, 0.7)], {CHAR: 0.6})
+    parts = asyncio.run(plugin.annotate_received_images(forwarded(3)))["modified_kwargs"]["message"]["raw_message"]
+    assert len(texts_of(parts)) == 1 and len(seen) == 1
+
+    plugin, seen, _ = build([hit(CHAR, 0.7)], {CHAR: 0.6})
+    parts = asyncio.run(plugin.annotate_received_images(forwarded(4)))["modified_kwargs"]["message"]["raw_message"]
+    assert seen == [] and texts_of(parts) == []
+
+    # 恶意深嵌套：不设上限时 visit() 会先把 RecursionError 抛在 6s 预算里。
+    plugin, seen, _ = build([hit(CHAR, 0.7)], {CHAR: 0.6})
+    asyncio.run(plugin.annotate_received_images(forwarded(60)))
+    assert seen == []
 
 
 def test_tool_returns_every_score_plus_the_aggregation():

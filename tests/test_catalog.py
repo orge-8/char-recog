@@ -83,7 +83,7 @@ def test_reupload_reuses_existing_image_and_keeps_label(tmp_path):
     assert len(list((store.root / "images").iterdir())) == 1
 
 
-@pytest.mark.parametrize("format", ["JPEG", "PNG", "WEBP"])
+@pytest.mark.parametrize("format", ["JPEG", "PNG", "WEBP", "GIF"])
 def test_supported_static_formats(format):
     buffer = io.BytesIO()
     Image.new("RGB", (16, 24), "red").save(buffer, format=format)
@@ -96,8 +96,7 @@ def test_decode_and_letterbox():
     assert out.size == (320, 320) and out.getpixel((0, 0)) == (124, 116, 104)
     buffer = io.BytesIO()
     image.save(buffer, format="GIF")
-    with pytest.raises(ValueError):
-        decode(buffer.getvalue())
+    assert decode(buffer.getvalue()).size == (20, 100), "0.7.0 起 GIF 不再被拒收"
 
 
 def test_decode_draft_uses_a_reduced_scale_but_keeps_geometry():
@@ -148,11 +147,11 @@ def test_decode_names_the_detected_format():
     with pytest.raises(ValueError, match="BMP"):
         decode(unsupported.getvalue())
 
+    # 动图不再是拒收理由（0.7.0）：同一份字节现在解出首帧，而不是抛异常。
     animated = io.BytesIO()
     frames = [Image.new("RGB", (8, 8), "red"), Image.new("RGB", (8, 8), "blue")]
     frames[0].save(animated, format="GIF", save_all=True, append_images=frames[1:])
-    with pytest.raises(ValueError, match="动图"):
-        decode(animated.getvalue())
+    assert decode(animated.getvalue()).getpixel((0, 0)) == (255, 0, 0)
 
 
 @pytest.mark.parametrize(

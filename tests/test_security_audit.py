@@ -389,7 +389,7 @@ def test_A9_uploads_never_become_pickle_inputs():
     """
     store = _source("recog/store.py")
     ingest = store.split("def ingest(")[1].split("\n    def ")[0]
-    assert "decode(raw)" in ingest, "ingest() 不再先解码图像"
+    assert "decode_with_animation(raw)" in ingest, "ingest() 不再先解码图像"
     # 入库路径是 images/<uuid><suffix>，与 models/ 的 weights.pt 不同目录
     assert '"images"' in ingest and "uuid.uuid4().hex" in ingest, (
         f"ingest() 的落盘位置与预期不符：{ingest[:200]}"
@@ -1145,26 +1145,39 @@ def test_F1_decode_rejects_oversized_images():
     assert 'simplefilter("error", Image.DecompressionBombWarning)' in source
     assert "width * height > MAX_PIXELS" in source
     # 尺寸必须在 draft 之前读，否则会被 draft 改小蒙混过关
-    body = source.split("def decode(")[1].split("\ndef ")[0]
+    body = source.split("def _decode(")[1].split("\ndef ")[0]
     assert body.index("width, height = source.size") < body.index("source.draft(")
 
 
-def test_F2_decode_restricts_formats_and_frames():
-    """只允许 JPEG/PNG/静态 WebP，动图先被帧数拦下。"""
+def test_F2_decode_restricts_containers_and_always_takes_the_first_frame():
+    """0.7.0 起：容器白名单是 JPEG/PNG/WebP/GIF，动图不再被拒，统一 seek(0) 取首帧。
+
+    这条测试守两件事：白名单不能被悄悄放宽到「任何 Pillow 认识的东西」；
+    「动图请走静态」这条旧语义不能以任何形式残留（否则会静默回到拒收行为）。
+    """
     source = _source("recog/images.py")
-    body = source.split("def decode(")[1].split("\ndef ")[0]
-    assert 'source.format not in {"JPEG", "PNG", "WEBP"}' in body
-    assert "n_frames" in body
-    # 帧数检查要在格式检查之前：动图要先说明"是动图"
-    assert body.index("n_frames") < body.index("source.format not in")
+    body = source.split("def _decode(")[1].split("\ndef ")[0]
+    assert 'SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")' in source
+    assert "source.format not in SUPPORTED_FORMATS" in body
+    # 旧语义的痕量：帧数硬拒与其文案都必须彻底消失
+    assert "n_frames" not in body
+    assert "请上传静态图片" not in body
+    # 首帧必须在 load() 之前定位，否则动图会解到当前帧
+    assert body.index("source.seek(0)") < body.index("source.load()")
 
 
-def test_F3_animated_and_foreign_formats_are_rejected():
-    """反向对照：GIF/BMP/SVG 真的进不来。"""
+def test_F3_foreign_and_corrupt_formats_are_still_rejected():
+    """反向对照：GIF 现在能进，BMP/SVG/截断文件仍然进不来。"""
+    from PIL import Image  # 本文件其余部分只读源码，不需要 PIL
+
+    valid = io.BytesIO()
+    Image.new("RGB", (8, 6), "red").save(valid, format="GIF")
+    assert images_mod.decode(valid.getvalue()).size == (8, 6)
+
     for label, data in (
-        ("gif", b"GIF89a" + b"\x00" * 32),
         ("bmp", b"BM" + b"\x00" * 64),
         ("svg", b"<svg xmlns='x'/>"),
+        ("truncated-gif", b"GIF89a" + b"\x00" * 32),
     ):
         with pytest.raises(Exception) as caught:
             images_mod.decode(data)

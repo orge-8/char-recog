@@ -13,7 +13,7 @@ import time
 import uuid
 import logging
 
-from .images import decode, fingerprint, similar, thumbnail
+from .images import decode_with_animation, fingerprint, similar, thumbnail
 from .scores import (
     DEFAULT_THRESHOLD,
     EVALUATION_THRESHOLD,
@@ -457,8 +457,14 @@ class Store:
             raise ValueError("只能领取本插件上传文件")
         raw = path.read_bytes()
         sha = hashlib.sha256(raw).hexdigest()
-        image = decode(raw)
+        image, animated = decode_with_animation(raw)
         fp = fingerprint(image)
+        if animated:
+            # 动图的像素指纹只覆盖首帧，两张「首帧相同、后续帧不同」的动图会算出
+            # 同一个 decoded —— 直接用它做精确去重会把真变体当成重复删掉。改认原始
+            # 字节：同一份文件仍然判重，不同文件各自留档。pHash 不动，模糊合并照旧
+            # 走 similar()。
+            fp["decoded"] = "animated:" + sha
         ident = uuid.uuid4().hex
         destination = self.root / "images" / (ident + path.suffix)
         with self.db() as db:
