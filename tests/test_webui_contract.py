@@ -240,6 +240,99 @@ def test_page_declares_the_actions_its_visible_section_triggers():
         assert not missing, f"{page}: 区块可触发但未声明 {sorted(missing)}"
 
 
+# 6 个入口页共用同一份 webui/index.html，区块之间只有这三条就地跳转（showSection）：
+# 被点的 data-* 属性 → 落到的区块 → 哪些区块的渲染逻辑会吐出它。
+JUMPS = {
+    "data-errors": ("images", {"training", "models"}),      # 任务卡 / 报告 / 版本卡 的「查看错判」
+    "data-report": ("training", {"training", "models"}),    # 任务卡 / 版本卡 的「查看报告」
+    "data-goto-capture": ("capture", {"training"}),         # 就绪度提示的「去待确认」
+}
+
+
+def reachable_sections(page: str) -> set:
+    """从某个入口页出发，showSection() 实际能把哪些区块拉到眼前。"""
+    edges = {}
+    for target, sources in JUMPS.values():
+        for source in sources:
+            edges.setdefault(source, set()).add(target)
+    seen, stack = {page}, [page]
+    while stack:
+        for nxt in edges.get(stack.pop(), ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return seen
+
+
+def test_jump_table_is_still_backed_by_the_source():
+    """跳转表是手写的，必须和源码对得上，否则下面的断言会静静地失去意义。"""
+    html = read_source()
+    for attribute, (target, _) in JUMPS.items():
+        assert f'node.dataset.{attribute[5:]}' in html or attribute in html, attribute
+        assert f"showSection('{target}')" in html, f"没有 showSection('{target}')"
+    sections = set(re.findall(r'<section class="section" id="([^"]+)"', html))
+    assert {target for target, _ in JUMPS.values()} <= sections
+
+
+# 每个区块的渲染函数能触发的写操作。图片区块在非图片标注页只留单张改标签，
+# 其余（批量/上传/删除/恢复）由 IMAGE_MANAGEMENT 门控，因此这里只列 label。
+SECTION_WRITES = {
+    "images": {"label"},
+    "training": {"submit", "eval_rebuild", "pause", "resume", "cancel", "delete_jobs",
+                 "apply_threshold", "reset_threshold", "test_upload", "upload"},
+    "capture": {"capture_confirm", "capture_undo", "capture_purge", "capture_cleanup"},
+    "models": {"activate", "rollback", "delete_versions",
+               "apply_threshold", "reset_threshold", "test_upload", "upload"},
+    "test": {"test_upload", "upload", "promote"},
+    "environment": {"start", "stop", "environment_mode",
+                    "install_dependencies", "remove_dependencies", "test_upload", "upload"},
+}
+# 图片标注页自己拥有完整的图片库管理能力。
+IMAGE_PAGE_WRITES = {
+    "label", "remove", "restore", "batch_positive", "batch_negative", "batch_remove",
+    "remove_all", "upload",
+}
+
+
+def test_jump_targets_declare_the_actions_they_can_fire():
+    """跳进别的区块后，那个区块的按钮必须在本页被声明，否则宿主报 API binding is not declared。
+
+    真机复现：0.7.0 在「训练任务 / 模型版本」页点「查看错判」→ 改标签 → 报
+    `Error: API binding is not declared`。根因是 6 个入口页共用同一份文档，
+    而 webui.json 只按「入口页自己的区块」声明 action。
+    """
+    declared = declarations()
+    for page in PAGES:
+        reached = reachable_sections(page)
+        needed = IMAGE_PAGE_WRITES if page == "images" else set().union(
+            *(SECTION_WRITES[section] for section in reached)
+        )
+        missing = needed - set(declared[page])
+        assert not missing, f"{page}: 可达区块会触发但未声明 {sorted(missing)}"
+        assert len(needed) <= 20, f"{page}: 需要 {len(needed)} 个 action，宿主上限 20"
+
+
+def test_image_management_is_gated_when_the_section_is_reached_from_another_page():
+    """非图片标注页只保留单张改标签；批量/上传/删除/恢复要回图片标注页做。
+
+    宿主按页放行 action（CustomPage.actions 上限 20/页），把图片库的写操作全量复制到
+    其它页会顶到上限，所以用 IMAGE_MANAGEMENT 门控，而不是扩大声明。
+    """
+    html = read_source()
+    assert "const IMAGE_MANAGEMENT = HOME_PAGE === 'images';" in html
+    # 卡片上的选择框、删除/恢复按钮都必须过门
+    assert "IMAGE_MANAGEMENT ? `<label class=\"check\">" in html
+    assert "(IMAGE_MANAGEMENT ? button('删除'" in html
+    # 工具栏的批量/上传/删除全部也必须在非图片页隐藏
+    assert "#images [data-action=\"remove_all\"]" in html
+    assert "\nif (!IMAGE_MANAGEMENT) {" in html
+    # build.py 只换 HOME_PAGE，门控常量必须跟着落到每一个生成页
+    for page in PAGES:
+        document = (ROOT / "webui" / f"{page}.html").read_text(encoding="utf-8")
+        assert f"const HOME_PAGE = '{page}';" in document, page
+        assert "const IMAGE_MANAGEMENT = HOME_PAGE === 'images';" in document, page
+
+
 def test_batch_uses_csv_and_remove_all_is_scoped():
     actions = declarations()[PAGES[0]]
     for alias in ("batch_positive", "batch_negative", "batch_remove"):

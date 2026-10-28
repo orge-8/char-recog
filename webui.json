@@ -599,6 +599,23 @@
             }
           }
         },
+        "label": {
+          "api": "self_label",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "label": {
+              "type": "string",
+              "required": true,
+              "choices": [
+                "self",
+                "other"
+              ]
+            }
+          }
+        },
         "upload": {
           "api": "self_upload",
           "version": "1",
@@ -632,6 +649,68 @@
               "max_length": 1024
             }
           }
+        },
+        "capture_confirm": {
+          "api": "self_capture_confirm",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "label": {
+              "type": "string",
+              "required": true,
+              "choices": [
+                "self",
+                "other"
+              ]
+            }
+          }
+        },
+        "capture_undo": {
+          "api": "self_capture_undo",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          }
+        },
+        "capture_purge": {
+          "api": "self_capture_purge",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "彻底删除这张聊天捕获？图片文件也会被删除，无法恢复。若只是想标记，请用 1–4 确认。"
+        },
+        "capture_cleanup": {
+          "api": "self_capture_cleanup",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": false,
+              "max_length": 32
+            }
+          },
+          "confirmation": "清理当前可见范围内已被自动排除的旧聊天捕获？会删除记录和图片文件，不影响人工标注的图片。"
         }
       },
       "uploads": {
@@ -812,6 +891,23 @@
             }
           }
         },
+        "label": {
+          "api": "self_label",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "label": {
+              "type": "string",
+              "required": true,
+              "choices": [
+                "self",
+                "other"
+              ]
+            }
+          }
+        },
         "upload": {
           "api": "self_upload",
           "version": "1",
@@ -845,6 +941,151 @@
               "max_length": 1024
             }
           }
+        },
+        "submit": {
+          "api": "self_training_submit",
+          "parameters": {
+            "request_key": {
+              "type": "string",
+              "required": true
+            },
+            "mode": {
+              "type": "string",
+              "required": true
+            },
+            "device": {
+              "type": "string",
+              "required": true
+            },
+            "input_size": {
+              "type": "integer",
+              "required": false,
+              "choices": [
+                224,
+                320,
+                448
+              ]
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "冻结当前标注和数据，开始新训练任务？"
+        },
+        "eval_rebuild": {
+          "api": "self_eval_rebuild",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "重建评估集会用当前图片重新挑选，历史报告不再可比。确认继续？"
+        },
+        "pause": {
+          "api": "self_training_pause",
+          "parameters": {
+            "job_id": {
+              "type": "string",
+              "required": true
+            }
+          },
+          "confirmation": "保存断点并暂停？"
+        },
+        "resume": {
+          "api": "self_training_resume",
+          "parameters": {
+            "job_id": {
+              "type": "string",
+              "required": true
+            }
+          }
+        },
+        "cancel": {
+          "api": "self_training_cancel",
+          "parameters": {
+            "job_id": {
+              "type": "string",
+              "required": true
+            }
+          },
+          "confirmation": "确认取消此任务？"
+        },
+        "delete_jobs": {
+          "api": "self_training_delete",
+          "version": "1",
+          "parameters": {
+            "jobs": {
+              "type": "string",
+              "required": true,
+              "max_length": 2048
+            }
+          }
+        },
+        "capture_confirm": {
+          "api": "self_capture_confirm",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "label": {
+              "type": "string",
+              "required": true,
+              "choices": [
+                "self",
+                "other"
+              ]
+            }
+          }
+        },
+        "capture_undo": {
+          "api": "self_capture_undo",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          }
+        },
+        "capture_purge": {
+          "api": "self_capture_purge",
+          "parameters": {
+            "image_id": {
+              "type": "string",
+              "required": true
+            },
+            "character": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            }
+          },
+          "confirmation": "彻底删除这张聊天捕获？图片文件也会被删除，无法恢复。若只是想标记，请用 1–4 确认。"
+        },
+        "capture_cleanup": {
+          "api": "self_capture_cleanup",
+          "parameters": {
+            "character": {
+              "type": "string",
+              "required": false,
+              "max_length": 32
+            }
+          },
+          "confirmation": "清理当前可见范围内已被自动排除的旧聊天捕获？会删除记录和图片文件，不影响人工标注的图片。"
         }
       },
       "uploads": {

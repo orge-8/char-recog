@@ -1,5 +1,34 @@
 # 更新日志
 
+## 0.7.1 · 2026-10-28（WebUI：跨区块跳转后改标签报 `API binding is not declared`）
+
+**现象**：在「训练任务」或「模型版本」页点「查看错判」，再在错判网格里点「是X / 不是X」，
+弹 `Error: API binding is not declared`，标签改不掉。图片列表本身加载正常。
+
+**根因**：6 个入口页共用同一份 `webui/index.html`（`build.py` 只替换 `HOME_PAGE`），
+区块之间靠 `showSection()` 就地跳转：`data-errors` → `images`、`data-report` → `training`、
+`data-goto-capture` → `capture`。但宿主按**页**放行 action（`CustomPage.actions`，上限 20 个/页），
+`webui.json` 此前只声明了「入口页自己那个区块」需要的 action —— training / models 没有 `label`，
+所以跳进图片区块后写操作被宿主拒绝。`queries` 恰好每页都齐（都能查 `pictures`），
+于是表现成「列表能看、只有改标签报错」，而不是整块不可用。
+
+**修法**
+
+- `webui.json`：`training` 补 `label` 与 `capture_*` 四个（16/20）；`models` 补 `label`、
+  训练区块的 6 个写操作与 `capture_*`（19/20）。跳转可达的写操作全部就地声明，仍在宿主上限内。
+- `webui/index.html`：新增 `IMAGE_MANAGEMENT = HOME_PAGE === 'images'` 门控。图片库的批量、
+  上传、删除、恢复、全选只在「图片标注」页渲染；从其它页跳进错判视图时只保留单张改标签。
+  理由是最省的做法：把图片库 8 个写操作全量复制到 6 个页面会顶破 20 个/页的限制。
+
+**防护**
+
+- `tests/test_webui_contract.py` 新增 3 条：跳转表必须与源码字面量对得上（`showSection('images')`）；
+  **每页必须声明其可达区块会触发的全部写操作**（这条直接抓住本次回归）；`IMAGE_MANAGEMENT`
+  门控必须落到 6 个生成页且 `HOME_PAGE` 各自正确。
+- 旧契约测试只扫「可见区块」的静态标记，而图片网格是 JS 模板拼出来的，所以从 0.3.x 起一直漏检；
+  本次把可达性（而非可见性）作为判据。
+- 有 torch 环境下 269 collected（口径：`tests/` 去掉 `test_security_audit.py` 与 `test_release_gate.py`）。
+
 ## 0.7.0 · 2026-10-27（动图支持：GIF / APNG / 动态 WebP 统一取首帧）
 
 **背景**：此前解码层先数帧、`n_frames != 1` 直接拒收，真实图库里 32.3% 的图片进不了库，

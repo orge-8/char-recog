@@ -124,6 +124,11 @@ const selected = new Set();
 const pick = (value, allowed, fallback) => allowed.includes(value) ? value : fallback;
 // build.py specializes this shared source for each sidebar entry.
 const HOME_PAGE = 'environment';
+// 6 个入口页共用同一份文档，区块之间用 showSection() 就地跳转（查看错判/查看报告/去待确认），
+// 但宿主只放行「本页 webui.json 声明的 action」（CustomPage.actions 上限 20 个/页）。
+// 因此图片库的写操作只在拥有它的「图片标注」页开放：从别处跳过来看错判只能单张改标签，
+// 批量、上传、删除、恢复一律回图片标注页做。
+const IMAGE_MANAGEMENT = HOME_PAGE === 'images';
 const PAGE_TITLES = {images:'图片标注',capture:'待确认',training:'训练任务',models:'模型版本',test:'识别测试',environment:'运行环境'};
 let tab = HOME_PAGE, page = 1,
   filter = 'all',
@@ -319,7 +324,7 @@ function renderImages() {
   $('image-count').textContent = data.pictures.total;
   $('image-source').textContent = data.pictures.source_text;
   $('image-grid').className = (list.length ? 'gallery' : '') + (picturesLoading ? ' is-loading' : '');
-  $('image-grid').innerHTML = list.length ? list.map(row => `<article class="picture ${selected.has(row.id) ? 'selected' : ''} maibot-card"><div class="picture-media"><img src="${thumbnail(row.thumbnail)}" alt="${escape(row.label_text)}图片" loading="lazy" decoding="async"><label class="check"><input type="checkbox" data-select-image="${escape(row.id)}" aria-label="选择图片 ${escape(row.id)}" ${selected.has(row.id) ? 'checked' : ''}></label></div><div class="picture-body"><div class="row between">${badge(row.label_text, row.label === 'self' ? 'good' : '')}${row.style ? badge(row.style_text) : ''}<small>${row.width} × ${row.height}</small></div><p class="picture-meta">${escape(row.status)} · ${escape(row.training_text)}${row.neg_type_text ? ` · ${escape(row.neg_type_text)}` : ''}${row.has_text ? ` · ${escape(row.has_text_text)}` : ''}${row.source_text ? ` · ${escape(row.source_text)}` : ''}<br><span class="mono" title="图组 ${escape(row.group_id)}">${escape(row.id.slice(0,12))}</span></p>${row.captured_text ? `<p class="hint">${escape(row.captured_text)}</p>` : ''}${row.model_text ? `<p class="hint" style="margin-bottom:9px">${escape(row.model_text)}</p>` : ''}<div class="picture-actions">${row.removed ? button('恢复',`data-image-action="restore" data-id="${escape(row.id)}"`,busy) : button('是'+character,`data-image-label="self" data-id="${escape(row.id)}"`,busy) + button('不是'+character,`data-image-label="other" data-id="${escape(row.id)}"`,busy) + button('删除',`data-image-action="remove" data-id="${escape(row.id)}"`,busy,'danger')}</div></div></article>`).join('') : empty(filter === 'errors' ? '暂无错判图片' : '这里还没有图片', filter === 'errors' && !errorJob ? '先从训练任务或模型版本中选择“查看错判”。' : '上传图片或换一个筛选范围。');
+  $('image-grid').innerHTML = list.length ? list.map(row => `<article class="picture ${selected.has(row.id) ? 'selected' : ''} maibot-card"><div class="picture-media"><img src="${thumbnail(row.thumbnail)}" alt="${escape(row.label_text)}图片" loading="lazy" decoding="async">${IMAGE_MANAGEMENT ? `<label class="check"><input type="checkbox" data-select-image="${escape(row.id)}" aria-label="选择图片 ${escape(row.id)}" ${selected.has(row.id) ? 'checked' : ''}></label>` : ''}</div><div class="picture-body"><div class="row between">${badge(row.label_text, row.label === 'self' ? 'good' : '')}${row.style ? badge(row.style_text) : ''}<small>${row.width} × ${row.height}</small></div><p class="picture-meta">${escape(row.status)} · ${escape(row.training_text)}${row.neg_type_text ? ` · ${escape(row.neg_type_text)}` : ''}${row.has_text ? ` · ${escape(row.has_text_text)}` : ''}${row.source_text ? ` · ${escape(row.source_text)}` : ''}<br><span class="mono" title="图组 ${escape(row.group_id)}">${escape(row.id.slice(0,12))}</span></p>${row.captured_text ? `<p class="hint">${escape(row.captured_text)}</p>` : ''}${row.model_text ? `<p class="hint" style="margin-bottom:9px">${escape(row.model_text)}</p>` : ''}<div class="picture-actions">${row.removed ? (IMAGE_MANAGEMENT ? button('恢复',`data-image-action="restore" data-id="${escape(row.id)}"`,busy) : '<small class="hint">已删除</small>') : button('是'+character,`data-image-label="self" data-id="${escape(row.id)}"`,busy) + button('不是'+character,`data-image-label="other" data-id="${escape(row.id)}"`,busy) + (IMAGE_MANAGEMENT ? button('删除',`data-image-action="remove" data-id="${escape(row.id)}"`,busy,'danger') : '')}</div></div></article>`).join('') : empty(filter === 'errors' ? '暂无错判图片' : '这里还没有图片', filter === 'errors' && !errorJob ? '先从训练任务或模型版本中选择“查看错判”。' : '上传图片或换一个筛选范围。');
   $('page-summary').textContent = `第 ${page} / ${data.pictures.pages} 页 · 共 ${data.pictures.total} 张`;
   $('previous-page').disabled = picturesLoading || page <= 1;
   $('next-page').disabled = picturesLoading || page >= data.pictures.pages;
@@ -944,6 +949,14 @@ for (const section of document.querySelectorAll('.section')) {
 }
 $('image-filter').value = filter;
 for (const item of document.querySelectorAll('[data-mode]')) item.setAttribute('aria-pressed', String(item.dataset.mode === mode));
+// 非图片标注页跳进「查看错判」时只保留单张改标签：批量、上传、删除全部、恢复都要回
+// 图片标注页，那里才声明了对应的 action（宿主按页放行，见 IMAGE_MANAGEMENT）。
+if (!IMAGE_MANAGEMENT) {
+  for (const node of document.querySelectorAll(
+    '#images [data-open-upload], #images [data-action="remove_all"], #images #select-page, #images #unselect-page, #images #return-library'
+  )) node.hidden = true;
+  $('selection-bar').hidden = true;
+}
 // The review queue has its own character scope; the header selector would look
 // like a queue filter but only changes the model badge.
 if (HOME_PAGE === 'capture') {
