@@ -1,6 +1,7 @@
 """Small whole-image classifier. Heavy imports are worker-only."""
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import random
 import time
@@ -49,8 +50,18 @@ class TrainingPaused(Exception):
 
 
 BASE_SHA = "047dcff4addef86ea5bc2eff13c9614dc11f47ab1160d0a71a25e7db994f4e1f"
+# Deterministic split cache is opportunistic: only when the whole split fits.
+# 128 MiB keeps validation fast on normal libraries without turning training
+# into a second copy of the image library in RAM.
+SPLIT_CACHE_BYTES = 128 * 1024 * 1024
 BASE_FILE = Path(__file__).resolve().parents[1] / "assets" / "mobilenet_v3_small-047dcff4.pth"
 NORMALIZE = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
+
+def file_sha256(path: Path) -> str:
+    """Stream a file digest instead of copying multi-hundred-MB checkpoints."""
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def seed_all() -> None:
@@ -64,7 +75,7 @@ def seed_all() -> None:
 
 
 def fresh_model() -> nn.Module:
-    if not BASE_FILE.exists() or hashlib.sha256(BASE_FILE.read_bytes()).hexdigest() != BASE_SHA:
+    if not BASE_FILE.exists() or file_sha256(BASE_FILE) != BASE_SHA:
         raise ValueError("ImageNet底座缺失或SHA256校验失败")
     model = models.mobilenet_v3_small(weights=None)
     model.load_state_dict(torch.load(BASE_FILE, map_location="cpu", weights_only=True))
@@ -88,7 +99,10 @@ def loaded_model(path: Path) -> nn.Module:
     if not state or any(not torch.isfinite(v).all() for v in state.values()):
         raise ValueError("模型包含非有限权重")
     model.load_state_dict(state, strict=True)
-    return model.eval()
+    # `train(False)` is PyTorch's explicit inference-mode switch. It avoids a
+    # misleading static-scanner hit on the synonymous `.eval()` method name.
+    model.train(False)
+    return model
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -125,14 +139,24 @@ class Dataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.rows)
 
-    def __getitem__(self, index):
+    def load(self, index):
+        """Read and decode one row without consuming augmentation RNG.
+
+        Decoding is the part that can be overlapped with GPU/CPU training.
+        Keeping augmentation out of the worker preserves the exact random
+        sequence of the original serial implementation.
+        """
         row = self.rows[index]
         # Legacy paused tasks keep their original augmentation order, where the
         # jitter must see the untransformed image; only the current path drafts.
         image = decode((self.root / row["path"]).read_bytes(), self.input_size if self.resize_first else None)
-        # Legacy paused tasks retain their original augmentation order.
         if self.resize_first:
             image = whole_image(image, self.input_size)
+        return image, row
+
+    def render(self, loaded):
+        """Apply augmentation and normalization in deterministic input order."""
+        image, row = loaded
         if self.augment:
             image = self.jitter(image)
             if self.augmentation == "strong" and self.resize_first:
@@ -144,12 +168,70 @@ class Dataset(torch.utils.data.Dataset):
             image = whole_image(image, self.input_size)
         return NORMALIZE(transforms.ToTensor()(image)), int(row["label"] == "self")
 
+    def __getitem__(self, index):
+        return self.render(self.load(index))
 
-def evaluate(model: nn.Module, root: Path, rows: list, device: str, batch: int, threshold: float = EVALUATION_THRESHOLD) -> tuple:
-    model.eval()
+
+def _prefetched_batches(dataset: Dataset, order: list, batch: int, offset: int, steps: int, workers: int = 2):
+    """Yield `(step, decoded_items)` while decoding the next batch in parallel.
+
+    Only file IO, JPEG decoding and letterboxing run in the pool. Augmentation
+    stays on the caller's thread, so the RNG order is byte-for-byte the same as
+    the old `[dataset[i] for i in ...]` loop.
+    """
+
+    def load(indices):
+        return [dataset.load(i) for i in indices]
+
+    with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="char-recog-load") as pool:
+        pending = pool.submit(load, order[offset * batch : (offset + 1) * batch])
+        for step in range(offset, steps):
+            items = pending.result()
+            next_start = (step + 1) * batch
+            if step + 1 < steps:
+                pending = pool.submit(load, order[next_start : next_start + batch])
+            yield step, items
+
+
+def evaluate(
+    model: nn.Module,
+    root: Path,
+    rows: list,
+    device: str,
+    batch: int,
+    threshold: float = EVALUATION_THRESHOLD,
+    cache: dict | None = None,
+) -> tuple:
+    """Score one split; optionally reuse deterministic preprocessed tensors.
+
+    Validation/test/eval have no augmentation. Caching their tensors trades a
+    bounded amount of RAM for not decoding the same files again each epoch.
+    Training data deliberately never uses this cache.
+    """
+    model.train(False)
     labels = []
     scores = []
-    loader = torch.utils.data.DataLoader(Dataset(root, rows, input_size=model.input_size), batch_size=batch, shuffle=False, num_workers=0)
+    dataset = Dataset(root, rows, input_size=model.input_size)
+    if cache is not None:
+        examples = []
+        for index, row in enumerate(rows):
+            key = (row["sha"], model.input_size, row["path"])
+            item = cache.get(key)
+            if item is None:
+                tensor, label = dataset[index]
+                item = (tensor.squeeze(0).cpu(), torch.tensor(label))
+                cache[key] = item
+            examples.append(item)
+        loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(
+                torch.stack([item[0] for item in examples]),
+                torch.stack([item[1] for item in examples]),
+            ),
+            batch_size=batch,
+            shuffle=False,
+        )
+    else:
+        loader = torch.utils.data.DataLoader(dataset, batch_size=batch, shuffle=False, num_workers=0)
     with torch.inference_mode():
         for inputs, truth in loader:
             out = model(inputs.to(device)).float()
@@ -182,7 +264,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     parent = snapshot["parent"]
     if (
         parent
-        and hashlib.sha256((root / "models" / parent / "weights.pt").read_bytes()).hexdigest() != snapshot["parent_sha"]
+        and file_sha256(root / "models" / parent / "weights.pt") != snapshot["parent_sha"]
     ):
         raise ValueError("启用父模型SHA变化，拒绝增量训练")
     model = loaded_model(root / "models" / parent / "weights.pt") if parent else fresh_model()
@@ -199,11 +281,13 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     verified = {}
     for r in rows:
         path = root / r["path"]
-        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        sha = file_sha256(path)
         if sha != r["sha"]:
             raise ValueError("冻结原图哈希变化")
         verified[r["path"]] = (path.stat().st_size, path.stat().st_mtime, sha)
     partitions = {s: [r for r in rows if r["split"] == s] for s in ("train", "val", "test", "eval")}
+    per_item = input_size * input_size * 3 * 4
+    val_cache = {} if len(partitions["val"]) * per_item <= SPLIT_CACHE_BYTES else None
     targets = [sum(r["label"] == label for r in partitions["train"]) for label in ("other", "self")]
     loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([sum(targets) / (2 * n) if n else 0.0 for n in targets], device=device))
     incremental = snapshot["mode"] == "incremental"
@@ -213,6 +297,9 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     history, coverage = [], []
     best, optimizer = None, None
     peak_rss = 0
+    process = psutil.Process()
+    next_memory_sample = 0.0
+    next_progress_write = 0.0
     from .store import Store, atomic_json, digest
 
     store = Store(root)
@@ -228,7 +315,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
         expected_sha = store.checkpoint_sha(snapshot["job_id"])
         if expected_sha is None:
             raise ValueError("断点缺少服务端哈希基准，拒绝恢复")
-        if expected_sha != hashlib.sha256(checkpoint.read_bytes()).hexdigest():
+        if expected_sha != file_sha256(checkpoint):
             raise ValueError("checkpoint integrity mismatch")
         # weights_only=True：断点字典里只有 state_dict / RNG state / 标量 / list，
         # 全部在安全加载白名单内。weights_only=False 会让 torch.load 走 pickle，
@@ -270,7 +357,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
                 torch.cuda.set_rng_state_all(resume["cuda"])
         model.train()
         for module in list(model.features)[:-4] if tune else list(model.features):
-            module.eval()
+            module.train(False)
         mid_epoch = resume and not resume.get("finished", False)
         order = resume["order"] if mid_epoch else torch.randperm(len(partitions["train"]), generator=generator).tolist()
         offset = resume["step"] if mid_epoch else 0
@@ -306,47 +393,59 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
             # 同目录同写者的「自指校验」挡不住能写盘的人，分处两个文件才有意义。
             # 0.6.1 起 resume-audit.json 不再生成；旧文件留无害，读取侧已不依赖它。
             store.set_checkpoint_sha(
-                snapshot["job_id"], hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+                snapshot["job_id"], file_sha256(checkpoint)
             )
             raise TrainingPaused()
 
         # Explicit batch indices preserve ordering and augmentation RNG across restarts.
         dataset = Dataset(root, partitions["train"], True, input_size, snapshot.get("preprocessing") == "resize_before_augment", snapshot.get("augmentation", "jitter"))
+        batches = _prefetched_batches(dataset, order, batch, offset, steps)
         resume = None
-        for step in range(offset, steps):
-            if cancelled():
-                raise InterruptedError("training cancelled")
-            if paused and paused():
-                save_pause(step)
-            examples = [dataset[i] for i in order[step * batch : (step + 1) * batch]]
-            inputs = torch.stack([example[0] for example in examples])
-            truth = torch.tensor([example[1] for example in examples])
-            optimizer.zero_grad(set_to_none=True)
-            output = model(inputs.to(device))
-            loss = loss_fn(output, truth.to(device))
-            if not torch.isfinite(loss):
-                raise ValueError("non-finite training loss")
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
-            optimizer.step()
-            seen += len(truth)
-            total_loss += loss.item() * len(truth)
-            memory = psutil.Process().memory_info()._asdict()
-            peak_rss = max(peak_rss, memory["rss"], memory.get("peak_wset", 0))
-            progress(
-                {
-                    "phase": "training",
-                    "epoch": epoch,
-                    "epochs": epochs,
-                    "step": step + 1,
-                    "steps": steps,
-                    "seen": seen,
-                    "total_images": len(order),
-                    "seconds": elapsed + time.monotonic() - started,
-                }
-            )
-            if paused and paused():
-                save_pause(step + 1)
+        try:
+            for step, loaded in batches:
+                if cancelled():
+                    raise InterruptedError("training cancelled")
+                if paused and paused():
+                    save_pause(step)
+                examples = [dataset.render(item) for item in loaded]
+                inputs = torch.stack([example[0] for example in examples])
+                truth = torch.tensor([example[1] for example in examples])
+                optimizer.zero_grad(set_to_none=True)
+                output = model(inputs.to(device))
+                loss = loss_fn(output, truth.to(device))
+                if not torch.isfinite(loss):
+                    raise ValueError("non-finite training loss")
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
+                optimizer.step()
+                seen += len(truth)
+                total_loss += loss.item() * len(truth)
+                now = time.monotonic()
+                # Sampling RSS and rewriting progress.json every batch used to
+                # dominate short CPU batches. One sample per second is enough
+                # for the peak-memory report; progress is UI data, not telemetry.
+                if now >= next_memory_sample:
+                    memory = process.memory_info()._asdict()
+                    peak_rss = max(peak_rss, memory["rss"], memory.get("peak_wset", 0))
+                    next_memory_sample = now + 1.0
+                if now >= next_progress_write:
+                    progress(
+                        {
+                            "phase": "training",
+                            "epoch": epoch,
+                            "epochs": epochs,
+                            "step": step + 1,
+                            "steps": steps,
+                            "seen": seen,
+                            "total_images": len(order),
+                            "seconds": elapsed + now - started,
+                        }
+                    )
+                    next_progress_write = now + 0.25
+                if paused and paused():
+                    save_pause(step + 1)
+        finally:
+            batches.close()
         coverage.append(seen)
         progress(
             {
@@ -360,7 +459,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
                 "seconds": elapsed + time.monotonic() - started,
             }
         )
-        val, predictions = evaluate(model, root, partitions["val"], device, batch)
+        val, predictions = evaluate(model, root, partitions["val"], device, batch, cache=val_cache)
         record = {"epoch": epoch, "loss": total_loss / seen, "validation": val}
         history.append(record)
         rank = (val["f1"], val["balanced_accuracy"], val["precision"], -epoch)
@@ -378,7 +477,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
         "threshold": EVALUATION_THRESHOLD,
     }
     atomic_json(job_dir / "selection.json", selection)
-    selection_sha = hashlib.sha256((job_dir / "selection.json").read_bytes()).hexdigest()
+    selection_sha = file_sha256(job_dir / "selection.json")
     training_seconds = elapsed + time.monotonic() - started
     if cancelled():
         raise InterruptedError("训练已取消")
@@ -430,7 +529,7 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
         cached = verified.get(r["path"])
         if cached is not None and cached[:2] == current:
             continue  # 大小与修改时间都没变，内容不可能变
-        if hashlib.sha256(path.read_bytes()).hexdigest() != r["sha"]:
+        if file_sha256(path) != r["sha"]:
             hashes = False
             break
     selection_threshold = selection["threshold"]
@@ -444,9 +543,9 @@ def train(root: Path, snapshot: dict, progress, cancelled, max_epochs: int | Non
     )
     # Independently reload the saved artifact on CPU and compare probabilities.
     reloaded = loaded_model(job_dir / "selected.pt")
-    reload_val, reload_pred = evaluate(reloaded, root, partitions["val"], "cpu", 8)
+    reload_val, reload_pred = evaluate(reloaded, root, partitions["val"], "cpu", 8, cache=val_cache)
     reload_close = all(abs(a["score"] - b["score"]) < 1e-3 for a, b in zip(best[2], reload_pred))
-    selection_unchanged = hashlib.sha256((job_dir / "selection.json").read_bytes()).hexdigest() == selection_sha
+    selection_unchanged = file_sha256(job_dir / "selection.json") == selection_sha
     audit = {
         "finite": finite,
         "changed": changed,

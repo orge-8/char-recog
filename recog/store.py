@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 import hashlib
 import json
+import math
+import os
 import random
 import shutil
 import sqlite3
@@ -111,7 +113,8 @@ class SourceIndex:
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
-        for name in ("images", "jobs", "models", "uploads"):
+        self._report_cache: dict = {}
+        for name in ("images", "jobs", "models", "uploads", "blobs"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         with self.db() as db:
             db.executescript("""
@@ -194,6 +197,8 @@ class Store:
                         db.execute("ALTER TABLE images_v6 RENAME TO images")
                     db.execute("CREATE INDEX IF NOT EXISTS images_group ON images(group_id)")
                     db.execute("CREATE INDEX IF NOT EXISTS images_character ON images(character)")
+                    db.execute("CREATE INDEX IF NOT EXISTS images_sha ON images(sha)")
+                    db.execute("CREATE INDEX IF NOT EXISTS images_decoded ON images(decoded)")
                     if legacy:
                         db.execute(
                             "INSERT OR REPLACE INTO settings VALUES (?,?)",
@@ -209,6 +214,19 @@ class Store:
                     db.execute("ROLLBACK TO SAVEPOINT migrate_v6")
                     db.execute("RELEASE SAVEPOINT migrate_v6")
                     raise
+            # Create indexes only after legacy ALTERs: an old database may lack
+            # `source`, and executing the index DDL before the ALTER aborts the
+            # whole plugin load.
+            db.execute("CREATE INDEX IF NOT EXISTS images_sha ON images(sha)")
+            db.execute("CREATE INDEX IF NOT EXISTS images_decoded ON images(decoded)")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS images_character_scope "
+                "ON images(character, removed, reason, label, group_id)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS images_character_source "
+                "ON images(character, source, label)"
+            )
 
     @contextmanager
     def db(self) -> Iterator[sqlite3.Connection]:
@@ -230,27 +248,43 @@ class Store:
             db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
 
     THUMBNAIL_LIMIT = 4096
+    THUMBNAIL_BYTES = 96 * 1024 * 1024
 
-    def _trim_thumbnails(self) -> None:
-        """缩略图缓存按 sha 命名、只增不减，与图片库同寿命增长。
+    def _trim_thumbnails(self) -> int:
+        """Trim the regenerable thumbnail cache by count and total bytes.
 
-        没有上限时一个装了几万张图的库会顺手攒下几万个 512px JPEG。
-        这里按条目数设上限，超了删最旧的；删缓存只是下次多算一次缩略图，
-        不影响正确性，所以失败也只在 debug 级留痕。
+        Entries are touched on cache hits (``images.thumbnail``), so sorting by
+        mtime is LRU. The caller invokes this once per gallery page, not once per
+        image; a page-level scan repeated 24 times was pure overhead.
         """
         cache = self.root / "thumbnails"
+        entries = []
         try:
-            entries = [p for p in cache.iterdir() if p.is_file()]
+            for path in cache.iterdir():
+                try:
+                    if path.is_file():
+                        entries.append((path.stat().st_mtime, path.stat().st_size, path))
+                except OSError:
+                    continue
         except OSError:
-            return
-        if len(entries) <= self.THUMBNAIL_LIMIT:
-            return
-        entries.sort(key=lambda p: p.stat().st_mtime)
-        for entry in entries[: len(entries) - self.THUMBNAIL_LIMIT]:
+            return 0
+        total = sum(item[1] for item in entries)
+        if len(entries) <= self.THUMBNAIL_LIMIT and total <= self.THUMBNAIL_BYTES:
+            return 0
+        entries.sort(key=lambda item: item[0])
+        removed = 0
+        for _, size, entry in entries:
+            if len(entries) - removed <= self.THUMBNAIL_LIMIT and total <= self.THUMBNAIL_BYTES:
+                break
             try:
                 entry.unlink()
+                total -= size
+                removed += 1
             except OSError as exc:
                 _LOG.debug("淘汰缩略图缓存失败（%s）：%s", entry, exc)
+        if removed:
+            _LOG.debug("淘汰缩略图缓存 %d 个，剩余约 %d 字节", removed, total)
+        return removed
 
     def sweep_uploads(self, max_age_seconds: float = 86400.0) -> int:
         """清掉 uploads/ 里超过时限的孤儿文件，返回删除个数。
@@ -441,6 +475,49 @@ class Store:
         _LOG.debug("聊天捕获未入库（%s）：%s", reason, path)
         return {"id": "", "reason": reason, "skipped": True}
 
+    def blob_path(self, sha: str) -> Path:
+        return self.root / "blobs" / sha[:2] / sha
+
+    def _store_blob(self, raw: bytes, sha: str) -> Path:
+        """Write one content-addressed copy; callers hardlink their row path."""
+        blob = self.blob_path(sha)
+        try:
+            if blob.is_file() and blob.stat().st_size == len(raw):
+                return blob
+        except OSError:
+            pass
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        temporary = blob.with_suffix("." + uuid.uuid4().hex + ".tmp")
+        try:
+            temporary.write_bytes(raw)
+            temporary.replace(blob)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return blob
+
+    def _link_or_copy(self, source: Path, blob: Path, destination: Path) -> None:
+        """Give each row its own path while one physical blob backs duplicates.
+
+        Windows NTFS, APFS and ext4 all support hardlinks on the same volume.
+        If a filesystem refuses, falling back to a copy keeps correctness; the
+        blob can then be garbage-collected once no row points at the same sha.
+        """
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(blob, destination)
+        except OSError:
+            if source.exists():
+                shutil.move(source, destination)
+            else:
+                destination.write_bytes(blob.read_bytes())
+        else:
+            # A locked upload should not fail the ingest after the destination
+            # link already exists; the orphan sweeper handles uploads/ later.
+            try:
+                source.unlink(missing_ok=True)
+            except OSError:
+                _LOG.debug("上传临时文件未能删除（%s），留待启动清理", source)
+
     def ingest(
         self,
         path: Path,
@@ -476,11 +553,16 @@ class Store:
             if existing is not None:
                 path.unlink()
                 return {"id": existing["id"], "reason": existing["reason"], "already_exists": True}
+            # Aspect ratio is a necessary condition of `similar()`; bounding it
+            # in SQL keeps per-upload work proportional to plausible variants,
+            # not to the whole character library.
+            low, high = fp["aspect"] * math.exp(-0.12), fp["aspect"] * math.exp(0.12)
             matches = [
                 dict(r)
                 for r in db.execute(
-                    "SELECT * FROM images WHERE character=? AND reason NOT IN ('solid','split_conflict')",
-                    (character,),
+                    "SELECT * FROM images WHERE character=? AND reason NOT IN ('solid','split_conflict') "
+                    "AND aspect BETWEEN ? AND ?",
+                    (character, low, high),
                 )
                 if similar(fp, dict(r))
             ]
@@ -515,7 +597,8 @@ class Store:
                     db.execute("DELETE FROM groups WHERE id=?", (old,))
                 if splits:
                     db.execute("UPDATE groups SET split=? WHERE id=?", (next(iter(splits)), group))
-            shutil.move(path, destination)
+            blob = self._store_blob(raw, sha)
+            self._link_or_copy(path, blob, destination)
             db.execute(
                 "INSERT INTO images(id,path,sha,decoded,phash,aspect,width,height,group_id,label,removed,reason,created,character,source,model_score) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
                 (
@@ -780,6 +863,7 @@ class Store:
                     "subtitle": f"{r['width']}×{r['height']}",
                 }
             )
+        if gallery:
             self._trim_thumbnails()
         for row, preview in zip(rows, gallery):
             row["thumbnail"] = preview["thumbnail"]
@@ -901,6 +985,9 @@ class Store:
             if not shared:
                 try:
                     (self.root / "thumbnails" / (sha + "-512.jpg")).unlink(missing_ok=True)
+                    blob = self.blob_path(sha)
+                    blob.unlink(missing_ok=True)
+                    blob.parent.rmdir()
                 except OSError:
                     pass
 
@@ -1294,10 +1381,18 @@ class Store:
         for base in ("jobs", "models"):
             path = self.root / base / job_id / "report.json"
             try:
-                text = path.read_text("utf-8")
-            except OSError:
+                stat = path.stat()
+                key = (str(path), stat.st_size, stat.st_mtime_ns)
+                cached = self._report_cache.get(key)
+                if cached is not None:
+                    return cached
+                report = json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError):
                 continue
-            return json.loads(text)
+            if len(self._report_cache) >= 4:
+                self._report_cache.clear()
+            self._report_cache[key] = report
+            return report
         return {}
 
     def job_or_model(self, job_id: str) -> dict:
@@ -1365,6 +1460,32 @@ class Store:
         with self.db() as db:
             return [dict(r) for r in db.execute("SELECT * FROM models ORDER BY created DESC")]
 
+    def active_map(self) -> dict:
+        """All `active:<character>` settings in one query."""
+        with self.db() as db:
+            return {
+                row[0][len("active:") :]: row[1]
+                for row in db.execute("SELECT key,value FROM settings WHERE key LIKE 'active:%'")
+                if row[1]
+            }
+
+    def model_selection(self, character: str) -> dict:
+        """Active/previous/threshold in one connection for the model page."""
+        keys = (f"active:{character}", f"previous:{character}", f"threshold:{character}")
+        with self.db() as db:
+            values = {
+                row[0]: row[1]
+                for row in db.execute(
+                    "SELECT key,value FROM settings WHERE key IN (?,?,?)", keys
+                )
+            }
+        threshold = self._parse_threshold(values.get(keys[2])) or DEFAULT_THRESHOLD
+        return {
+            "active": values.get(keys[0], ""),
+            "previous": values.get(keys[1], ""),
+            "threshold": threshold,
+        }
+
     def model_size(self, version: str) -> int:
         """Bytes the version occupies, including reports archived next to it."""
         total = 0
@@ -1375,3 +1496,161 @@ class Store:
             except OSError:
                 continue
         return total
+
+    def model_sizes(self) -> dict:
+        """All version sizes in one tree walk instead of one walk per version."""
+        sizes: dict[str, int] = {}
+        root = self.root / "models"
+        try:
+            for base, _, files in os.walk(root):
+                relative = Path(base).relative_to(root)
+                if not relative.parts:
+                    continue
+                version = relative.parts[0]
+                for name in files:
+                    try:
+                        sizes[version] = sizes.get(version, 0) + (Path(base) / name).stat().st_size
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        return sizes
+
+    def ensure_blob_links(self) -> dict:
+        """Consolidate existing duplicate image files into content-addressed blobs.
+
+        This is idempotent and does not change any database row. Each image keeps
+        its own path (all callers and backups continue to work), but paths with
+        the same SHA become hardlinks to one physical file when the filesystem
+        supports it. A hardlink failure leaves the original untouched.
+        """
+        linked = 0
+        skipped = 0
+        with self.db() as db:
+            rows = db.execute("SELECT path,sha FROM images").fetchall()
+        for row in rows:
+            sha = row["sha"] or ""
+            raw_path = self.root / row["path"]
+            if raw_path.is_symlink():
+                skipped += 1
+                continue
+            path = raw_path.resolve()
+            if (
+                len(sha) != 64
+                or any(ch not in "0123456789abcdef" for ch in sha)
+                or not path.is_relative_to((self.root / "images").resolve())
+                or not path.is_file()
+            ):
+                skipped += 1
+                continue
+            blob = self.blob_path(sha)
+            try:
+                if blob.is_file():
+                    if os.path.samefile(path, blob):
+                        continue
+                    if blob.stat().st_size != path.stat().st_size:
+                        skipped += 1
+                        continue
+                    temporary = path.with_name("." + uuid.uuid4().hex + ".link")
+                    os.link(blob, temporary)
+                    os.replace(temporary, path)
+                else:
+                    blob.parent.mkdir(parents=True, exist_ok=True)
+                    os.link(path, blob)
+                linked += 1
+            except OSError:
+                skipped += 1
+        return {"linked": linked, "skipped": skipped}
+
+    def cleanup_caches(self, now: float | None = None) -> dict:
+        """Remove only regenerable data; never images, models, reports or jobs."""
+        now = time.time() if now is None else now
+        removed_bytes = 0
+        removed_files = 0
+        removed_files += self._trim_thumbnails()
+        downloads = self.root / "dependencies" / "downloads"
+        if downloads.is_dir():
+            for path in downloads.iterdir():
+                try:
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    age = now - path.stat().st_mtime
+                    # A completed wheel is reproducible from the signed index;
+                    # a stale partial is useless. Keep recent files so an
+                    # interrupted installation can still resume.
+                    if age < 30 * 86400:
+                        continue
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed_files += 1
+                    removed_bytes += size
+                except OSError:
+                    continue
+        # Orphan blobs can only come from an interrupted ingest. The age guard
+        # protects a blob written a moment ago but not yet referenced by a row.
+        with self.db() as db:
+            referenced = {row[0] for row in db.execute("SELECT DISTINCT sha FROM images")}
+        blobs = self.root / "blobs"
+        if blobs.is_dir():
+            for path in blobs.rglob("*"):
+                if not path.is_file() or path.name in referenced:
+                    continue
+                try:
+                    if now - path.stat().st_mtime < 3600:
+                        continue
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed_files += 1
+                    removed_bytes += size
+                except OSError:
+                    continue
+        return {"files": removed_files, "bytes": removed_bytes}
+
+    def storage_stats(self) -> dict:
+        """Physical versus logical image bytes plus the main data directories."""
+        def tree(path: Path) -> tuple[int, int]:
+            size = 0
+            count = 0
+            try:
+                for base, _, files in os.walk(path):
+                    for name in files:
+                        try:
+                            stat = (Path(base) / name).stat()
+                        except OSError:
+                            continue
+                        size += stat.st_size
+                        count += 1
+            except OSError:
+                pass
+            return size, count
+
+        logical = 0
+        physical_inodes = {}
+        with self.db() as db:
+            rows = db.execute("SELECT path FROM images").fetchall()
+        for row in rows:
+            path = self.root / row["path"]
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            logical += stat.st_size
+            key = (stat.st_dev, stat.st_ino) if stat.st_ino else str(path)
+            physical_inodes[key] = stat.st_size
+        thumbnails = tree(self.root / "thumbnails")
+        models = tree(self.root / "models")
+        jobs = tree(self.root / "jobs")
+        downloads = tree(self.root / "dependencies" / "downloads")
+        blobs = tree(self.root / "blobs")
+        return {
+            "images_logical": logical,
+            "images_physical": sum(physical_inodes.values()),
+            "images_saved": max(0, logical - sum(physical_inodes.values())),
+            "image_rows": len(rows),
+            "blobs": blobs[0],
+            "thumbnails": thumbnails[0],
+            "thumbnail_files": thumbnails[1],
+            "models": models[0],
+            "jobs": jobs[0],
+            "downloads": downloads[0],
+        }

@@ -356,6 +356,7 @@ HOST_PROCESS_GRAPH = (
     "recog/scores.py",
     "recog/processes.py",
     "recog/environment.py",
+    "recog/phash.py",
 )
 # 由独立子进程自举运行的模块（recog/launcher.py 用文件路径启动它们，不再走 `-m`）
 SUBPROCESS_GRAPH = ("recog/probes.py", "recog/bootstrap.py", "recog/launcher.py", "recog/dependency_download.py")
@@ -363,10 +364,14 @@ SUBPROCESS_GRAPH = ("recog/probes.py", "recog/bootstrap.py", "recog/launcher.py"
 ALL_IMPORT_GRAPH = HOST_PROCESS_GRAPH + SUBPROCESS_GRAPH
 
 # 宿主侧（不派生子进程）import 图里出现的第三方包 -> 清单里的发行名
+# 0.7.3 补 imagehash：0.7.2 新增 recog/phash.py 时它只是可选依赖、未进 manifest，
+# 因此 import 图与映射表都没同步；现在声明为正式依赖，两处必须补齐，
+# 否则 test_declared_dependencies_cover_the_import_graph 会把它判成「声明了没用到」。
 THIRD_PARTY_TO_DISTRIBUTION = {
     "PIL": "Pillow",
     "numpy": "numpy",
     "psutil": "psutil",
+    "imagehash": "imagehash",
 }
 
 

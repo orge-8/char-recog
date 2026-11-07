@@ -44,7 +44,7 @@ GPU 版 PyTorch 默认选择 CUDA，也可选择 CPU；CPU 版使用 CPU；识�
 
 停止推理后，通过手动开启或重新加载插件恢复。重载页面仅更新页面文件。
 
-推理进程**超时或崩溃不再永久关闭自动识别**：首先熔断 30 秒，之后由后台自动重启；连续失败按 30/60/120/300 秒退避。第一条消息的冷启动（`import torch`）由后台预热线程完成，不占用下文的单条消息预算。手动停止是唯一粘性状态，只有手动开启或重载插件能解除。
+推理进程**超时或崩溃不再永久关闭自动识别**：首先熔断 30 秒，之后由后台自动重启；连续失败按 30/60/120/300 秒退避。后台预热只启动 worker 并完成 `import torch`/握手，**不预载角色模型**；首个命中请求按需加载对应模型，占用与配置角色数脱钩。常驻模型缓存默认 16 个、按 LRU 淘汰（`CHAR_RECOG_MAX_MODELS` 可调）。手动停止是唯一粘性状态，只有手动开启或重载插件能解除。
 
 ## 依赖模型
 
@@ -59,6 +59,8 @@ GPU 版 PyTorch 默认选择 CUDA，也可选择 CPU；CPU 版使用 CPU；识�
 - **宿主环境**只装插件加载链路真正需要的东西：`recog/images.py` 顶层 `from PIL import Image`，`numpy` 在指纹计算时懒加载。这两个包在 `_manifest.json` 的 `dependencies` 里声明为 `Pillow >=11,<13`、`numpy >=2,<3`；宿主版本不满足时会拒绝加载。
 - **插件覆盖层**里的 `torch`/`torchvision`/`psutil` 不写进 `dependencies`：体积太大（GPU 版约 2.7GB），不该让宿主预装。`psutil` 只在训练 worker 里用于采样峰值内存。
 - **自定义环境**模式下插件不会安装任何东西，`torch`、`torchvision`、`psutil`、`Pillow`、`numpy` 必须已经存在；缺包时页面会提示「未安装 xxx」。
+- **为什么 `torch`/`torchvision`/`psutil` 不写进 manifest dependencies**：宿主会按 manifest 自动安装到主环境，而 GPU 主包约 2.7 GB，这会把一个可选角色模型功能变成宿主的强制依赖。它们由管理员在「运行环境」页显式安装到插件覆盖层；训练/推理 worker 只从覆盖层加载。这是运行环境契约，不是漏声明。
+- `parents[1]`/`parents[2]` 在本插件里只用于从 `recog/*.py` 回到**本插件根目录**（定位 launcher、底座权重和页面），不会读取兄弟插件。`catalog.sqlite3` 是 `ctx.paths.data_dir` 下的插件自有数据库，不是宿主数据库。
 - 安装依赖需要 `uv` 在 PATH 中，并且能访问 `download.pytorch.org`（见「数据流向与网络访问」）。没有 `uv` 会明确报错，不会静默降级。
 
 ## 图片与标注
@@ -115,7 +117,9 @@ JPEG 解码走 libjpeg 的缩尺解码（`Image.draft`）：训练时按该任�
 
 每个实例同时运行一个训练任务。任务开始时冻结数据和标签，训练期间的标注修改用于下一次任务。暂停保存训练状态，继续使用同一快照；最终核验阶段可取消。中断任务由管理员手动重试。
 
-训练运行期间，推理 worker 自动降为 1 个 CPU 线程，训练结束后恢复；识别服务继续可用，聊天不被阻塞。
+训练运行期间，推理 worker 自动降为 1 个 CPU 线程，训练结束后恢复；识别服务继续可用，聊天不被阻塞。推理默认也是 1 个 CPU 线程（小模型逐头 forward 在常见 4 核机器上更快），可用 `CHAR_RECOG_INFERENCE_THREADS` 覆盖。
+
+训练侧会把下一批的读盘、JPEG 解码与 letterbox 预取到后台，增广仍按原顺序在主线程执行；验证集在单任务内存预算 128 MiB 内缓存预处理张量，超出预算自动退回逐批解码。RSS 每秒采样一次，进度文件最多每 250 ms 写一次。
 
 报告包含精确率及其分子分母、召回率、F1、准确率、混淆矩阵、错判图片和耗时。混淆矩阵行表示真值、列表示预测，顺序为"不是该角色／是该角色"。重复使用的测试集标为历史留出评测；留出标签或成员变化后，报告间的分数需要分别评估。指标默认按当前判定阈值重算，见「判定阈值」。
 
@@ -158,7 +162,9 @@ recognize_character_image(message_id, image_index=0, character="")
 - `catalog.sqlite3`：图片、标签、任务和版本记录。`jobs` 表的 `device` / `input_size` 两列供任务列表使用，避免每次轮询都读取快照（旧库自动 ALTER，旧任务首次读取时回填）。
 - `settings` 键：`active:<角色>` / `previous:<角色>` / `last_held_truth:<角色>` / `threshold:<角色>` / `eval_built:<角色>` / `characters` / `form_request_key` / `test_history` / `last_test` / `worker_mode` / `worker_override` / `ui_state`（页面上次选择的角色、筛选与训练选项）。
 - `uploads/`：宿主上传凭证落点（领取后即入库，不长期保留）。
-- `images/`、`thumbnails/`：原图与缩略图缓存。
+- `images/`：每张图片记录自己的路径；内容相同的文件通过硬链接指向 `blobs/` 中的同一份物理数据。数据库路径和备份语义不变。
+- `blobs/`：按 SHA256 内容寻址的原图实体。启动时幂等迁移既有重复文件；非硬链接文件系统自动退回独立副本。
+- `thumbnails/`：可再生成的缩略图缓存，按 4096 条与 96 MiB 双重上限做 LRU 淘汰。
 - `test-images/`：识别测试用图（只保留最近 24 张，超期即删）。
 - `jobs/<任务>/`：训练快照、断点、进度与报告。在训练页手动清理任务记录时，先把 `report.json` 与 `snapshot.json` 复制到 `models/<任务>/`，再连同快照、断点与日志一起删除。
 - `models/<版本>/weights.pt`：角色模型。任务记录清理后，同一目录下还保留 `report.json` 与 `snapshot.json`，模型页的「查看报告 / 查看错判」和下一次增量训练都靠它们；模型权重不受任务清理影响。在模型页删除版本时，整个目录连同这些留档一起移除（任务记录仍在时，任务页的报告不受影响）。
@@ -167,6 +173,10 @@ recognize_character_image(message_id, image_index=0, character="")
 - `environment-status.json`、`environment.log`、`inference.log`：安装与推理状态、日志。
 
 发布插件时包含源码、页面、声明文件和通用预训练底座。运行数据、环境、配置和日志由各实例保管。
+
+运行环境页的“存储与模型缓存”面板显示原图逻辑/实际占用、硬链接节省、模型、任务、缩略图和安装包占用。缓存清理按钮只删除可再生成内容（超限缩略图、30 天前安装包、无引用超过 1 小时的孤儿 blob）；原图、模型、报告、任务和暂停断点不会被自动删除。
+
+发布包用 `python tools/package_plugin.py dist/char-recog.zip` 生成：保留底座与运行所需文件，排除 `tests/`、`docs/`、`tools/`、Git 元数据和各类缓存。同机性能基线用 `python tools/benchmark_workloads.py` 采集。
 
 训练任务记录支持手动清理（0.5.25）：只有已完成、失败、中断、取消或暂停的任务可删，运行中的一律拒绝；一次最多 50 条。删除是单向操作，页面会用确认框说明留档范围。
 
@@ -185,6 +195,18 @@ recognize_character_image(message_id, image_index=0, character="")
 - 训练与推理的模型权重只读本地文件：ImageNet 底座与已训练模型都做 SHA256 校验后才加载。
 - 训练断点（`resume.pt`）用 `torch.load` 恢复，仅由训练 worker 写入，并与 `resume-audit.json` 里的快照摘要 + 文件 SHA256 双向核对；用户上传的图片永远不会成为反序列化输入。
 
+## 故障排查
+
+**图片没有提示，状态显示冷启动/冷却中。** 先看「运行环境」页的推理状态与 `inference.log`。冷启动只加载 PyTorch，不再预载模型；第一条图片会额外等待一次模型加载。冷却中说明 worker 超时或崩溃，30 秒后会自动重试，连续失败按 30/60/120/300 秒退避。手动停止是唯一需要人工开启的状态。
+
+**长期运行后内存没有随角色数暴涨。** worker 只保留最近使用的模型，默认上限 16。要调大/调小可设置环境变量 `CHAR_RECOG_MAX_MODELS`；若每张图都会访问全部角色，上限低于角色数会导致反复换入换出，应保持不小于常用角色数。
+
+**存储面板显示“去重节省 0”。** 新入库图片会自动写 `blobs/`；旧图在下次加载时幂等补硬链接。非硬链接文件系统（部分网络盘/FAT）会退回独立副本，功能正常但没有空间收益。
+
+**缓存清理后空间没变化。** 该操作只删除缩略图、30 天前安装包缓存和无引用超过 1 小时的 blob；原图、模型、报告、任务与断点必须由管理员在对应页面显式删除。
+
+**测试因磁盘空间假红。** 训练用例会写临时权重，C: 剩余空间低于约 2 GB 时先清理自己的临时目录，不要删除其他人的 `pytest-NNN` 会话目录。
+
 ## 验证
 
 测试命令：
@@ -193,7 +215,7 @@ recognize_character_image(message_id, image_index=0, character="")
 python -m pytest tests
 ```
 
-**0.6.1 起不再需要 `maibot_sdk` 也能测插件层。** `tests/conftest.py` 在会话开始时把一个最小 SDK 桩装进 `sys.modules`，于是原先恒为「整模块跳过」的三个文件——`test_plugin_loads.py`、`test_tool.py`、`test_annotation_policy.py`——现在会真正执行。当前完整环境（含 torch）实测 **412 collected / 409 passed / 3 skipped**，其中 0.6.0 变更集口径为 **235 collected / 234 passed / 1 skipped**。
+**0.6.1 起不再需要 `maibot_sdk` 也能测插件层。** `tests/conftest.py` 在会话开始时把一个最小 SDK 桩装进 `sys.modules`，于是原先恒为「整模块跳过」的 `test_plugin_loads.py`、`test_tool.py`、`test_annotation_policy.py` 现在会真正执行。0.8.0 完整环境实测 **468 collected / 465 passed / 3 skipped**；排除审计与发布门禁两个文件后的变更集口径为 **288 collected**。
 
 > 这次改动不是锦上添花：0.6.0 把 `Store.ingest` 从 9 个参数砍到 6 个时漏改了 `_capture` 的调用点，整条聊天捕获链路静默失效，**没有任何一条测试报出来**——因为唯一会执行插件层的那三个文件全都是 0 收集。桩只提供 `plugin.py` 实际 import 的 8 个符号，不实现权限模型与 `ctx`；需要宿主行为的测试仍应自带 fake ctx（见 `tests/test_release_gate.py`）。
 

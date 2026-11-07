@@ -30,6 +30,7 @@ from .recog.scores import (
     sweep,
 )
 from .recog.images import DECODE_VERSION, MAX_BASE64_BYTES
+from .recog.phash import compute_phash, similar_key
 
 DEFAULT_CHARACTERS = ["洛天依", "言和", "乐正绫", "乐正龙牙", "徵羽摩柯", "墨清弦", "星尘", "心华"]
 # 合并转发最多下钻 3 层。宿主序列化/反序列化也会递归，插件侧只能防住自己的栈；
@@ -68,6 +69,8 @@ class CharacterRecognition(MaiBotPlugin):
         # 因此 on_load 让出事件循环期间消息钩子就可能被触发。先备好钩子要用的状态，
         # 再把 service 挂上去，避免这段窗口里抛 AttributeError。
         self._image_cache = {}
+        # exact key -> pHash digest; kept in lockstep with _image_cache eviction.
+        self._image_phash = {}
         self.service = await offload(Service, self.ctx.paths.data_dir, self.config.worker_python)
         from .recog.environment import recover
         await offload(recover, self.service)
@@ -75,6 +78,11 @@ class CharacterRecognition(MaiBotPlugin):
         # 聊天捕获静默失效的参数 bug），且不留日志。重启时按时限扫一次，
         # 否则磁盘会悄悄涨满而没人知道原因。
         await offload(self.service.store.sweep_uploads)
+        # Existing libraries may contain one physical copy per character row.
+        # Hardlinking them is metadata-only and idempotent; failures leave files
+        # untouched. Cache cleanup then removes only regenerable artifacts.
+        await offload(self.service.store.ensure_blob_links)
+        await offload(self.service.store.cleanup_caches)
         await self.sync_characters()
         # Let the monitor warm the worker in the background so the first image
         # does not have to pay the torch import inside a 6 second chat budget.
@@ -86,8 +94,14 @@ class CharacterRecognition(MaiBotPlugin):
         await offload(self.service.store.set_setting, "characters", json.dumps(characters, ensure_ascii=False))
 
     def active_versions(self) -> dict:
-        """character -> active model version."""
-        return {c: self.service.store.active(c) for c in self.service.store.active_characters()}
+        """character -> active model version, read in one query when supported."""
+        store = self.service.store
+        active_map = getattr(store, "active_map", None)
+        if active_map is not None:
+            return active_map()
+        # Compatibility with lightweight host/test shims that only implement
+        # the older per-character accessors.
+        return {c: store.active(c) for c in store.active_characters()}
 
     def active_thresholds(self) -> dict:
         """character -> online gate, for every character with an active model."""
@@ -133,18 +147,52 @@ class CharacterRecognition(MaiBotPlugin):
                     # DECODE_VERSION 在 key 里：解码语义一变（0.7.0 起动图不再拒收、
                     # 统一取首帧），同一份字节解出来的张量就不是同一个东西了，旧缓存必须作废。
                     key = (hashlib.sha256(raw).hexdigest(), versions_key, limits_key, DECODE_VERSION)
+                    # Tests (and a partially initialised instance) may only have
+                    # _image_cache; create the pHash index lazily to stay fail-open.
+                    phash_index = getattr(self, "_image_phash", None)
+                    if phash_index is None:
+                        phash_index = self._image_phash = {}
                     prediction = self._image_cache.get(key)
+                    digest = None
+                    if prediction is None:
+                        # Optional enhancement: without imagehash/Pillow this is a
+                        # no-op and behaviour is exactly the 0.7.1 exact cache.
+                        digest = await offload(compute_phash, raw)
+                        reused = similar_key(digest, phash_index.items(), key[1:]) if digest else None
+                        if reused is not None:
+                            # similar_key only accepts entries with an identical
+                            # (versions, limits, DECODE_VERSION) scope, so a verdict
+                            # from an older model / looser gate is never reused.
+                            prediction = self._image_cache.get(reused)
                     if prediction is None:
                         # wait=False: a cold or cooling worker never blocks the chat
                         # path; this image simply goes unannotated and the next one
                         # is picked up once the background warm-up finishes.
-                        prediction = await offload(
-                            self.service.infer, raw, max(0.1, deadline - time.monotonic()), "", wait=False
-                        )
-                        if prediction.get("status") == "ok" and prediction.get("results"):
-                            if len(self._image_cache) >= 512:
-                                self._image_cache.pop(next(iter(self._image_cache)))
-                            self._image_cache[key] = prediction
+                        infer = getattr(self.service, "infer_encoded", None)
+                        if infer is not None:
+                            prediction = await offload(
+                                infer,
+                                binary,
+                                max(0.1, deadline - time.monotonic()),
+                                "",
+                                wait=False,
+                            )
+                        else:  # lightweight test/service shims
+                            prediction = await offload(
+                                self.service.infer,
+                                raw,
+                                max(0.1, deadline - time.monotonic()),
+                                "",
+                                wait=False,
+                            )
+                    if prediction.get("status") == "ok" and prediction.get("results"):
+                        if len(self._image_cache) >= 512:
+                            oldest = next(iter(self._image_cache))
+                            self._image_cache.pop(oldest, None)
+                            phash_index.pop(oldest, None)
+                        self._image_cache[key] = prediction
+                        if digest:
+                            phash_index[key] = digest
                     policy = select_top(prediction.get("results", []), limits)
                     top = policy["top1"]
                     if self.config.chat_capture:
@@ -503,6 +551,17 @@ class CharacterRecognition(MaiBotPlugin):
 
         return await offload(status, self.service)
 
+    @API("self_storage", version="1")
+    async def storage(self) -> dict:
+        stats = await offload(self.service.store.storage_stats)
+        runtime = await offload(self.service.inference_runtime)
+        return {"stats": stats, "inference": runtime}
+
+    @API("self_storage_cleanup", version="1")
+    async def storage_cleanup(self) -> dict:
+        result = await self._action(self.service.store.cleanup_caches)
+        return {**result, "success": True}
+
     @API("self_environment_manage", version="1")
     async def manage_environment(self, kind: str) -> dict:
         from .recog.environment import submit
@@ -776,9 +835,9 @@ class CharacterRecognition(MaiBotPlugin):
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
         rows = [r for r in await offload(self.service.store.models) if not character or r.get("character") in {"", character}]
-        active = await offload(self.service.store.active, character)
-        previous = await offload(self.service.store.previous, character)
-        sizes = await offload(lambda: {row["id"]: self.service.store.model_size(row["id"]) for row in rows})
+        selection = await offload(self.service.store.model_selection, character)
+        active, previous = selection["active"], selection["previous"]
+        sizes = await offload(self.service.store.model_sizes)
         previous_row = next((row for row in rows if row["id"] == previous), None)
         for r in rows:
             m = json.loads(r["metrics"])
@@ -787,7 +846,7 @@ class CharacterRecognition(MaiBotPlugin):
                 status="使用中" if r["id"] == active else "未启用",
                 can_activate=r["id"] != active,
                 input_size=m.get("input_size", 320),
-                size=sizes[r["id"]],
+                size=sizes.get(r["id"], 0),
             )
             for split in ("validation", "test"):
                 metric = m[split]
@@ -800,7 +859,7 @@ class CharacterRecognition(MaiBotPlugin):
             "active": next((r["name"] for r in rows if r["id"] == active), "未启用"),
             "can_rollback": previous_row is not None,
             "rollback_text": f"回退目标：{previous_row['name']}" if previous_row else "无可回退版本",
-            "threshold": await offload(self.service.store.threshold, character),
+            "threshold": selection["threshold"],
             "threshold_default": DEFAULT_THRESHOLD,
         }
 

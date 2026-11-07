@@ -118,6 +118,12 @@ def similar(a: dict, b: dict) -> bool:
 
 def thumbnail(path: Path, cache: Path | None = None) -> str:
     if cache is not None and cache.is_file():
+        # Touch on access so the cache is trimmed by least-recently-used rather
+        # than least-recently-generated. A failure here must not hide the image.
+        try:
+            cache.touch()
+        except OSError:
+            pass
         return "data:image/jpeg;base64," + base64.b64encode(cache.read_bytes()).decode()
     image = decode(path.read_bytes(), 512)
     # Keep a 24-image page below the gateway's 512KiB response budget.

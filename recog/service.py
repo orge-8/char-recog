@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -36,6 +37,48 @@ WIRE_LOCK_WAIT = 0.3
 # resumable checkpoint, so the page warns about that before asking.
 DELETABLE_STATES = {"complete", "failed", "cancelled", "interrupted", "paused"}
 DELETE_LIMIT = 50
+
+
+class _Wire:
+    """One persistent stdio request thread per worker.
+
+    A per-request thread was the old implementation: every image created and
+    joined a thread merely to impose a deadline on a blocking pipe read. This
+    keeps the deadline but pays one long-lived thread per worker instead.
+    The caller still owns `infer_lock`, so exactly one request is in flight.
+    """
+
+    def __init__(self, process):
+        self.process = process
+        self._queue: queue.Queue = queue.Queue()
+        self.thread = threading.Thread(target=self._run, name="infer-wire", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            payload, done, outcome = item
+            try:
+                self.process.stdin.write(json.dumps(payload) + "\n")
+                self.process.stdin.flush()
+                outcome.append(self.process.stdout.readline())
+            except (OSError, UnicodeError, ValueError):
+                outcome.append("")
+            finally:
+                done.set()
+
+    def request(self, payload: dict, timeout: float) -> tuple[str, bool]:
+        outcome: list[str] = []
+        done = threading.Event()
+        self._queue.put((payload, done, outcome))
+        if not done.wait(max(0.0, timeout)):
+            return "", True
+        return (outcome[0] if outcome else ""), False
+
+    def stop(self) -> None:
+        self._queue.put(None)
 
 
 def inference_error_message(detail: str) -> str:
@@ -82,6 +125,8 @@ class Service:
         self._state = threading.RLock()
         self._ready_event = threading.Event()
         self._warm_thread = None
+        self._wire = None
+        self._wire_process = None
         self.closed = threading.Event()
         self.environment_process = None
         self.environment_cache = None
@@ -528,6 +573,27 @@ class Service:
         with self._state:
             return max(0, int(max(self.breaker_until, self.retry_at) - time.monotonic()))
 
+    def inference_runtime(self) -> dict:
+        """Runtime readiness plus the worker's bounded model-cache state."""
+        state = self.inference_state()
+        result = {
+            "state": state,
+            "threads": self.threads_applied,
+            "models_loaded": None,
+            "model_limit": None,
+        }
+        if state == "ready":
+            try:
+                status = self.exchange({"operation": "status"}, 0.5)
+            except Exception:
+                return result
+            if status.get("status") == "ready":
+                result.update(
+                    models_loaded=status.get("models_loaded"),
+                    model_limit=status.get("model_limit"),
+                )
+        return result
+
     def enable_auto(self) -> None:
         """Allow the background warm-up; called once from plugin.on_load."""
         with self._state:
@@ -544,7 +610,7 @@ class Service:
         return self._start_lock
 
     def _active_versions(self) -> dict:
-        return {character: self.store.active(character) for character in self.store.active_characters()}
+        return self.store.active_map()
 
     def _not_ready_result(self) -> dict:
         state = self.inference_state()
@@ -636,28 +702,32 @@ class Service:
     def _reap(self, process, thread=None) -> None:
         self._terminate(process, thread)
         with self._state:
+            wire = self._wire if self._wire_process is process else None
+            if self._wire_process is process:
+                self._wire = None
+                self._wire_process = None
             self.inference = None
             self.ready = False
             self.warming = False
             self._ready_event.clear()
+        if wire is not None:
+            wire.stop()
+            wire.thread.join(0.5)
 
-    @staticmethod
-    def _round_trip(process, payload: dict, timeout: float):
+    def _wire_for(self, process):
+        with self._state:
+            if self._wire_process is not process:
+                if self._wire is not None:
+                    self._wire.stop()
+                self._wire = _Wire(process)
+                self._wire_process = process
+            return self._wire
+
+    def _round_trip(self, process, payload: dict, timeout: float):
         """Write one request and read one line, bounded by `timeout`."""
-        output = []
-
-        def read_response():
-            try:
-                process.stdin.write(json.dumps(payload) + "\n")
-                process.stdin.flush()
-                output.append(process.stdout.readline())
-            except (OSError, UnicodeError):
-                output.append("")
-
-        thread = threading.Thread(target=read_response, daemon=True)
-        thread.start()
-        thread.join(max(0.0, timeout))
-        return (output[0] if output else ""), thread.is_alive(), thread
+        wire = self._wire_for(process)
+        line, timed_out = wire.request(payload, timeout)
+        return line, timed_out, wire.thread
 
     def _exchange_on(self, process, payload: dict, timeout: float) -> dict:
         """Round trip used by the warm-up thread; takes the wire lock itself."""
@@ -684,7 +754,6 @@ class Service:
             return ""
 
     def _warm(self) -> None:
-        started = time.monotonic()
         process = None
         try:
             with self._start_lock:
@@ -708,25 +777,10 @@ class Service:
                             self.threads_applied = threads
                     except Exception as exc:
                         _LOG.warning("推理线程数调整失败：%s", exc)
-                for character, version in sorted(self._active_versions().items()):
-                    if not version:
-                        continue
-                    if self._abort_warm():
-                        break
-                    try:
-                        result = self._exchange_on(
-                            process,
-                            {"operation": "load", "character": character, "version": version},
-                            WARMUP_LOAD_TIMEOUT,
-                        )
-                    except Exception as exc:
-                        # One bad character must not invalidate the whole worker.
-                        _LOG.warning("预热跳过「%s」：%s", character, exc)
-                    else:
-                        if result.get("status") != "ready":
-                            _LOG.warning("预热跳过「%s」：%s", character, result.get("error") or result.get("status"))
-                    if time.monotonic() - started > WARMUP_DEADLINE:
-                        raise RuntimeError("推理预热超时")
+                # Model loading belongs to the first request for that character.
+                # Eagerly loading every active model made cold start and RSS grow
+                # linearly with the configured character count, although most
+                # installs use only a few of them per session.
             with self._state:
                 aborted = self.user_stopped or self.closed.is_set()
                 self.warming = False
@@ -929,20 +983,26 @@ class Service:
                     return
                 raise ValueError("依赖安装/卸载正在运行，请等待完成")
 
-    def infer(self, raw: bytes, timeout: float = 8, character: str = "", *, wait: bool = True) -> dict:
-        """Single-character score (character empty = every character with an active model)."""
+    def infer_encoded(
+        self, image_base64: str, timeout: float = 8, character: str = "", *, wait: bool = True
+    ) -> dict:
+        """Score an image that is already base64, avoiding a decode/re-encode pair."""
         if character:
             if not self.store.active(character):
                 return {"status": "no_model"}
         elif not self.store.active_characters():
             return {"status": "no_model"}
-        payload = {"image": base64.b64encode(raw).decode()}
+        payload = {"image": image_base64}
         if character:
             payload["character"] = character
         try:
             return self.request(payload, timeout, wait=wait)
         except Exception as exc:
             return {"status": "model_error", "error": str(exc)}
+
+    def infer(self, raw: bytes, timeout: float = 8, character: str = "", *, wait: bool = True) -> dict:
+        """Single-character score (character empty = every character with an active model)."""
+        return self.infer_encoded(base64.b64encode(raw).decode(), timeout, character, wait=wait)
 
     def activate(self, character: str, version: str) -> dict:
         with self.store.db() as db:

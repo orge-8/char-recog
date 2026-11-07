@@ -377,3 +377,27 @@ python scripts/check_submission.py . --plugin-id org.civetc.char-recog
 
 - 真机（宿主 1.3.15）发一张 ≤12 MB 动图表情包，确认提示出现；再发 >16 MB GIF，确认按静态首帧处理且不崩。
 - WebUI 上传 GIF 仍被宿主拒绝（预期行为，见 D8）。
+
+## 2026-11-07 性能与存储治理（0.8.0）
+
+完整环境（Python 3.13.14、torch 2.14.1+cpu、torchvision 0.29.1+cpu）：
+
+- `pytest tests -q`：**465 passed / 3 skipped / 0 failed**，共 468 collected。
+- 排除 `test_security_audit.py` 与 `test_release_gate.py` 的变更集口径：**288 collected**。
+- `check_plugin.py --plugin ...`：**PASS 75 / WARN 14 / FAIL 0**；WARN 均为既有的组件命名启发式（按名称相似度提示人工确认，实际装饰器均紧随目标函数）。
+- `tests/smoke_test.py`（真实 SDK `PluginContext`、临时数据目录）：生命周期加载、组件注册、重复卸载均通过。
+- 新增 `tests/test_performance_optimizations.py` 9 项与 `tests/test_package_plugin.py` 1 项，覆盖常驻通道、按需加载、缩略图单页一次清理与字节 LRU、硬链接去重、缓存清理边界、预取输出等价性和发布包清单。
+
+本机微基准（`tools/benchmark_workloads.py --images 16`，临时合成素材，仅用于同机前后对照）：
+
+| 项目 | 实测 |
+|---|---:|
+| 图片库一页查询 | 34.3 ms |
+| 缩略图缓存命中 | 0.39 ms |
+| 存储统计遍历 | 11.3 ms |
+| 模型目录体积 | 0.10 ms |
+| 缓存清理扫描 | 13.3 ms |
+
+这组数字不是跨机器性能承诺，也不构成“旧版慢多少”的证据；旧版对照需在同一临时语料上用相同脚本复跑。体积方面，单包 0.8.0 为 **9,856,323 字节 / 32 个文件**（解压后 11,513,005 字节，SHA256 `0b4f698a4f9da8b160ed082e95f84955c50931fd547b7d78bc764d01ad923ac4`），底座仍占约 10.31 MB 原始体积，发布包的小幅变化来自文档与新增测试/工具被排除后的净效应。
+
+**未验证项**：没有在 MaiBot 1.4.0 / SDK 2.21.0 真机上加载；因此本轮不修改 manifest 的宿主/SDK 上限。WebUI 存储面板与推理缓存状态只在浏览器静态语法和 API 契约层验证，未接真机 dashboard 截图。

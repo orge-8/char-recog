@@ -96,6 +96,7 @@
   <section class="section" id="environment" role="region" aria-label="运行环境">
     <div class="stats"><div class="stat maibot-card"><p class="label">环境模式</p><div class="number" id="env-mode" style="font-size:22px">—</div></div><div class="stat maibot-card"><p class="label">PyTorch</p><div class="number" id="env-dependency" style="font-size:22px">—</div></div><div class="stat maibot-card"><p class="label">GPU 训练</p><div class="number" id="env-cuda" style="font-size:22px">—</div></div></div>
     <div class="env-grid"><div class="card maibot-card"><div class="card-head"><div><h3>当前环境</h3></div></div><dl class="info-list" id="env-info"></dl><p class="hint" id="env-guide"></p></div><div class="card maibot-card"><div class="card-head"><div><h3>环境与依赖管理</h3></div></div><div class="env-action"><div class="row between"><h3>Python 环境</h3></div><div class="row" style="margin-top:12px"><button class="maibot-button" id="env-host" disabled data-env-mode="host">共享覆盖层</button><button class="maibot-button" id="env-private" disabled data-env-mode="custom">自定义环境</button></div></div><div class="env-action" id="dependency-controls"><h3>PyTorch 依赖</h3><div class="row" style="margin-top:12px"><button class="maibot-button" id="env-cpu" disabled data-env-kind="cpu">CPU 版本</button><button class="maibot-button" id="env-gpu" disabled data-env-kind="gpu">GPU 版本</button></div></div><div class="env-action row between"><div><h3>推理服务</h3><p id="inference-note">正在读取推理状态…</p></div><div class="row"><button class="maibot-button" id="start-inference" disabled data-action="start">开启推理</button><button class="maibot-button" id="stop-inference" disabled data-action="stop">停止推理</button></div></div></div></div>
+    <div class="card maibot-card" id="storage-card" style="margin-top:18px"><div class="card-head"><div><h3>存储与模型缓存</h3><p id="storage-summary">正在统计…</p></div><button class="maibot-button small" id="storage-cleanup" data-action="storage_cleanup">清理缓存</button></div><dl class="info-list" id="storage-info"></dl><p class="hint">清理只删除可再生成的缩略图、过期安装包与无引用临时文件；原图、模型、报告、任务和暂停断点均不删除。</p></div>
     <div class="card maibot-card" id="dependency-log" style="margin-top:18px"><div class="card-head"><div><h3>安装任务与日志</h3><p id="env-operation">—</p></div><div class="row"><button class="maibot-button small" id="copy-env-log">复制日志</button><span class="badge maibot-badge" id="env-operation-state">—</span></div></div><p id="dependency-progress-text" class="hint"></p><progress id="dependency-progress" max="100" aria-label="依赖安装进度"></progress><pre id="env-log" class="log maibot-inset" tabindex="0" aria-label="安装日志">正在读取日志…</pre></div>
   </section>
   <footer class="footer"><span></span><span id="updated-at">等待首次加载</span></footer>
@@ -134,7 +135,7 @@ let tab = HOME_PAGE, page = 1,
   filter = 'all',
   errorJob = '', reportJob = '', compareJob = '',
   mode = 'incremental', device = 'cpu', inputSize = null, deviceChosen = false;
-let busy = false, loading = false, loadAgain = false, loadAgainSilent = false, generation = 0, lastUpdate = '', picturesLoading = false, noticeTimer = 0;
+let busy = false, loading = false, loadAgain = false, loadAgainSilent = false, generation = 0, lastUpdate = '', picturesLoading = false, noticeTimer = 0, pollTimer = 0;
 let uploadKind = 'library', uploadLabel = 'self', uploadRows = [], uploadRunning = false, uploadController = null, retryArgs = null;
 let capturePage = 1, captureFocus = 0, captureUndo = null;
 let captureCharacter = '';
@@ -265,6 +266,9 @@ async function load(silent = false) {
   if (!silent) { $('refresh').disabled = true; $('refresh').textContent = '更新中…'; }
   try {
     if (!data.env || current === 'environment' || current === 'training') track('env', await query('env'));
+    // Storage walks the whole data tree. Refresh on navigation/manual reload,
+    // not on every 5-second activity poll while an install is running.
+    if (current === 'environment' && (!data.storage || !silent)) track('storage', await query('storage'));
     if (!data.characters) { const value = await query('characters'); rows(value,'角色名单'); data.characters = value; renderCharacters(); }
     if (!data.versions || current === 'models') { const value = await query('versions', { character }); rows(value,'模型版本'); track('versions', value); }
     if (current === 'images' || current === 'training') track('form', await query('form', { character }));
@@ -292,7 +296,25 @@ async function load(silent = false) {
     loading = false;
     if (!silent) { $('refresh').disabled = false; $('refresh').textContent = '刷新'; }
     if (loadAgain) { const again = loadAgainSilent; loadAgain = false; loadAgainSilent = false; void load(again); }
+    else schedulePoll();
   }
+}
+function pollingNeeded() {
+  if (document.hidden || busy || loading || uploadRunning) return false;
+  if (tab === 'training') {
+    return Boolean(data.jobs?.rows?.some(row => ['queued','running','pausing','cancelling'].includes(row.state)));
+  }
+  if (tab === 'environment') return Boolean(data.env?.detecting || data.env?.progress_running);
+  return false;
+}
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  pollTimer = 0;
+  if (!pollingNeeded()) return;
+  pollTimer = setTimeout(async () => {
+    pollTimer = 0;
+    await load(true);
+  }, 5000);
 }
 function render() {
   updateHeader();
@@ -301,7 +323,7 @@ function render() {
   if (tab === 'training') renderTraining();
   if (tab === 'models') renderModels();
   if (tab === 'test') renderTests();
-  if (tab === 'environment') renderEnvironment();
+  if (tab === 'environment') { renderEnvironment(); renderStorage(); }
 }
 function updateSelection() {
   $('selection-bar').hidden = selected.size === 0;
@@ -607,6 +629,23 @@ function renderEnvironment() {
   const log = $('env-log'), bottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30, scroll = log.scrollTop;
   if (log.textContent !== env.log) { log.textContent = env.log; log.scrollTop = bottom ? log.scrollHeight : scroll; }
 }
+function renderStorage() {
+  const payload = data.storage;
+  if (!payload) { $('storage-summary').textContent = '正在统计…'; $('storage-info').innerHTML = ''; return; }
+  const stats = payload.stats || {}, runtime = payload.inference || {};
+  const cache = runtime.models_loaded == null ? '模型按需加载' : `${runtime.models_loaded}/${runtime.model_limit} 个模型常驻`;
+  $('storage-summary').textContent = `原图实际占用 ${formatSize(stats.images_physical || 0)} · 去重节省 ${formatSize(stats.images_saved || 0)} · ${cache}`;
+  $('storage-info').innerHTML = [
+    ['原图（逻辑/实际）', `${formatSize(stats.images_logical || 0)} / ${formatSize(stats.images_physical || 0)}`],
+    ['图片记录', `${stats.image_rows || 0} 行`],
+    ['模型版本', formatSize(stats.models || 0)],
+    ['训练任务', formatSize(stats.jobs || 0)],
+    ['缩略图缓存', `${formatSize(stats.thumbnails || 0)} · ${stats.thumbnail_files || 0} 个文件`],
+    ['安装包缓存', formatSize(stats.downloads || 0)],
+    ['推理状态', `${runtime.state || '未知'} · ${cache}`],
+  ].map(([key, value]) => `<dt>${key}</dt><dd class="mono">${escape(value)}</dd>`).join('');
+  $('storage-cleanup').disabled = busy;
+}
 async function operate(alias, args = {}, success = '操作已完成') {
   if (busy || uploadRunning) return false;
   busy = true; render(); notice('正在处理，请稍候…');
@@ -771,6 +810,7 @@ document.addEventListener('click', event => {
   if (node.dataset.thresholdApply !== undefined && node.dataset.thresholdApply !== '') void operate('apply_threshold',{ character, value:node.dataset.thresholdApply },'判定阈值已更新');
   if (node.dataset.thresholdManual !== undefined) void operate('apply_threshold',{ character, value:$('threshold-manual').value },'判定阈值已更新');
   if (node.dataset.thresholdReset !== undefined) void operate('reset_threshold',{ character },'判定阈值已恢复默认');
+  if (node.dataset.action === 'storage_cleanup') { data.storage = null; void operate('storage_cleanup', {}, '缓存已清理'); return; }
   if (['stop','start'].includes(node.dataset.action)) void operate(node.dataset.action);
   if (node.dataset.openUpload) openUpload(node.dataset.openUpload);
   if (node.dataset.uploadLabel && !uploadRunning) { uploadLabel = node.dataset.uploadLabel; for (const item of document.querySelectorAll('[data-upload-label]')) item.setAttribute('aria-pressed',String(item.dataset.uploadLabel === uploadLabel)); }
@@ -989,7 +1029,7 @@ catch (error) {
 // Restore before the first load so every query runs with the remembered scope.
 try { applyUi(await query('ui')); } catch {}
 showSection(HOME_PAGE);
-setInterval(() => { if (!document.hidden && !busy && !loading && !uploadRunning && ['training','environment'].includes(tab)) void load(true); },5000);
+schedulePoll();
 </script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 """Dedicated train / persistent CPU inference processes, stdio JSON protocol."""
 
 from pathlib import Path
+from collections import OrderedDict
 import argparse
 import base64
 import hashlib
@@ -10,9 +11,19 @@ import sys
 import time
 import traceback
 
+# Keep a bounded model cache instead of holding every configured character for
+# the life of the worker. Six models are cheap; a hundred are not. The limit is
+# deliberately above normal deployments so the common path never evicts.
+MAX_LOADED_MODELS = max(1, int(os.environ.get("CHAR_RECOG_MAX_MODELS", "16")))
+
 from .store import Store, atomic_json, digest
 from .images import MAX_EDGE, decode
 from .scores import DEFAULT_THRESHOLD, judgment
+
+
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def train_job(root: Path, job_id: str) -> None:
@@ -48,7 +59,7 @@ def train_job(root: Path, job_id: str) -> None:
         destination = root / "models" / job_id
         destination.mkdir(exist_ok=True)
         (directory / "selected.pt").replace(destination / "weights.pt")
-        sha = hashlib.sha256((destination / "weights.pt").read_bytes()).hexdigest()
+        sha = file_sha256(destination / "weights.pt")
         atomic_json(directory / "report.json", report)
         atomic_json(destination / "audit.json", {**report["audit"], "sha256": sha, "snapshot_sha": digest(snapshot)})
         with store.db() as db:
@@ -92,11 +103,15 @@ def serve(root: Path) -> None:
     import torch
     from .model import loaded_model, score_tensor, tensor_for_image
 
-    default_threads = min(4, torch.get_num_threads())
+    # Small MobileNet forwards are faster single-threaded on typical 4-core
+    # hosts (documented baseline: 311 ms vs 718 ms for six models). Allow an
+    # explicit override for hosts where a benchmark says otherwise.
+    configured = max(1, int(os.environ.get("CHAR_RECOG_INFERENCE_THREADS", "1")))
+    default_threads = min(configured, torch.get_num_threads())
     torch.set_num_threads(default_threads)
     current_threads = default_threads
     store = Store(root)
-    loaded = {}  # character -> (version, model)
+    loaded = OrderedDict()  # character -> (version, model), least recently used first
     records = {}  # version -> model row
 
     def refresh_records() -> None:
@@ -129,10 +144,15 @@ def serve(root: Path) -> None:
             raise ValueError("模型版本不存在")
         path = root / "models" / version / "weights.pt"
         audit = json.loads((path.parent / "audit.json").read_text("utf-8"))
-        if not audit["passed"] or hashlib.sha256(path.read_bytes()).hexdigest() != record["sha"]:
+        if not audit["passed"] or file_sha256(path) != record["sha"]:
             raise ValueError("模型核验失败")
         model = loaded_model(path)  # assign only after successful load
         loaded[character] = (version, model)
+        loaded.move_to_end(character)
+        # Current request may need more models than the cache limit; the score
+        # is already computed before eviction, so evicting here is safe.
+        while len(loaded) > MAX_LOADED_MODELS:
+            loaded.popitem(last=False)
         return model
 
     for line in sys.stdin:
@@ -141,7 +161,22 @@ def serve(root: Path) -> None:
             operation = request.get("operation")
             if operation == "ping":
                 # Readiness handshake; the host uses it to bound cold start.
-                result = {"status": "ready", "threads": current_threads, "default_threads": default_threads}
+                # Models are intentionally not preloaded: runtime readiness and
+                # per-character model readiness are separate facts.
+                result = {
+                    "status": "ready",
+                    "threads": current_threads,
+                    "default_threads": default_threads,
+                    "models_loaded": len(loaded),
+                    "model_limit": MAX_LOADED_MODELS,
+                }
+            elif operation == "status":
+                result = {
+                    "status": "ready",
+                    "models_loaded": len(loaded),
+                    "model_limit": MAX_LOADED_MODELS,
+                    "characters": list(loaded),
+                }
             elif operation == "threads":
                 # Training is CPU hungry: lend threads back while it runs.
                 value = int(request.get("value") or 0)
@@ -188,6 +223,8 @@ def serve(root: Path) -> None:
                     try:
                         if loaded.get(character, ("", None))[0] != version:
                             load(character, version)
+                        else:
+                            loaded.move_to_end(character)
                         _, model = loaded[character]
                         size = model.input_size
                         tensor = tensors.get(size)

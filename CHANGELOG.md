@@ -1,5 +1,142 @@
 # 更新日志
 
+## 0.8.0 · 2026-11-07（性能、内存与运行数据治理）
+
+本篇是纯工程优化：不改变模型结构、权重格式、判定公式、阈值语义或 WebUI
+业务规则。旧 `weights.pt`、暂停断点、报告与回滚链继续可用。
+
+**启动与内存**
+
+- 推理进程的“运行时就绪”与“全部模型已加载”正式拆开：预热只完成
+  `import torch` 与 `ping`，不再逐个加载全部启用模型。首个角色请求按需加载，
+  冷启动时间不再随角色数线性增长。
+- worker 模型缓存改为有上限的 LRU（默认 16，可用
+  `CHAR_RECOG_MAX_MODELS` 调整）。超出后淘汰最久未用模型，常驻内存不再
+  与配置角色总数同步增长。
+- 主进程的 stdio 通道改为每个 worker 一个常驻 I/O 线程，替代“每次请求
+  新建线程”；超时、熔断、进程回收语义保持不变。
+- 推理线程默认从最多 4 改为 1。项目既有实测（六模型、4 核）为
+  1 线程 311 ms、4 线程 718 ms；需要多线程的宿主可设
+  `CHAR_RECOG_INFERENCE_THREADS`。
+- 聊天路径直接把宿主已解码的 base64 交给 worker，去掉一次
+  base64 解码后再编码的往返。
+
+**训练**
+
+- 图片读取、JPEG 解码与 letterbox 改为下一批预取；增广仍在主线程按原顺序
+  执行，随机数消费顺序与旧实现一致。
+- 验证集输入在单任务内缓存，上限 128 MiB；不满足整集容量时自动退回原路径。
+  test/eval 仍按原语义独立计算。
+- RSS 从每批采样改为每秒一次，进度 JSON 最多每 250 ms 写一次。
+- 模型、断点、图片与 selection 的 SHA256 改为流式读取，避免一次性复制大文件。
+
+**查询与 WebUI**
+
+- 新增 `images(sha)`、`images(decoded)`、`images(character,removed,reason,label,group_id)`、
+  `images(character,source,label)` 索引；只在旧库列迁移完成后创建。
+- 同角色近重复匹配先用长宽比范围裁剪，再执行原有 pHash/解码比较。
+- 启用角色、模型页 active/previous/threshold、模型目录体积均合并为单次查询/单次遍历。
+- 报告 JSON 增加 `(路径, 大小, mtime_ns)` 进程内缓存，最多 4 份；文件被替换时自动失效。
+- 缩略图按“条数 + 总字节”双重上限淘汰（96 MiB），命中时 touch 形成 LRU；
+  清理从“每张图一次”改为“每页一次”。
+- 训练/环境页的固定 5 秒轮询改为活动驱动：只有任务或安装运行时才继续，
+  空闲时停止；页面重新可见仍立即刷新。
+- 运行环境页新增“存储与模型缓存”面板，可查看逻辑/实际原图占用、去重节省、
+  模型/任务/缩略图/安装包占用和 worker 模型缓存状态，并提供缓存清理按钮。
+
+**运行数据**
+
+- 原图改为内容寻址 blob + 每行独立硬链接：数据库路径、审计、备份和读取接口
+  均不变，同一 SHA 的跨角色副本只占一份物理空间。非硬链接文件系统自动退回
+  复制，不改变正确性。
+- 启动时幂等迁移既有重复文件；失败只跳过，不删除原文件。
+- 缓存清理只删除可再生成数据：超限缩略图、30 天前安装包缓存、无引用超过
+  1 小时的孤儿 blob。原图、模型、报告、任务、暂停断点永不自动删除。
+- 新增 `tools/package_plugin.py` 单包发布构建（保留底座，排除 tests/docs/tools/
+  Git 与缓存）与 `tools/benchmark_workloads.py` 同机微基准。
+
+**验证**
+
+- 完整环境 **288 collected**（排除 `test_security_audit.py` 与
+  `test_release_gate.py` 的变更集口径）。新增回归覆盖常驻通道、按需加载、
+  缩略图单次清理与字节 LRU、硬链接去重、缓存安全边界、预取输出等价性与
+  发布包清单。
+- 未改动 `_manifest.json` 的宿主/SDK 版本区间。官方已发布 MaiBot 1.4.0 /
+  SDK 2.21.0，但本轮未取得对应真机加载验证，不能凭开发机测试放宽上限。
+
+## 0.7.3 · 2026-11-07（A1 依赖改由 Host 自动安装）
+
+**背景**：0.7.2 把 phash 增强做成「可选依赖」。2026-11-07 实测发现
+`imagehash.phash` 内部 `import scipy.fftpack.dct`，scipy 同样是实际硬依赖；
+只装 imagehash 会抛 `ModuleNotFoundError`，被 `compute_phash()` 的异常保护吞掉后
+**静默退回 0.7.1 的精确缓存**，部署方看不出任何异常。真机要生效必须手工装包。
+
+**修法**
+
+- `_manifest.json` 的 `dependencies` 新增一条 `python_package`：`imagehash>=4.3,<5`。
+  MaiBot 1.3.x 的插件加载流程会对 `python_package` 自动安装（`uv pip install`，
+  回退 `pip install`）；该字段此前已用于 Pillow / numpy，本次沿用同一机制。
+- **不单独声明 scipy**：ImageHash 4.3.2 的 `Requires-Dist` 明确包含 `scipy`、
+  `PyWavelets`、`numpy`、`pillow`，pip/uv 默认随 imagehash 一并装好。单独声明反而会被
+  `test_declared_dependencies_cover_the_import_graph` 判为「声明了从不 import 的依赖」
+  ——插件代码并不直接 import scipy。
+- 补齐该门禁自身漏掉的两处元数据（0.7.2 引入 `recog/phash.py` 时未同步）：
+  `HOST_PROCESS_GRAPH` 加入 `recog/phash.py`，`THIRD_PARTY_TO_DISTRIBUTION` 加入
+  `imagehash -> imagehash`。**断言没有放宽**，「声明了的必须真的被 import」保持原样。
+- `recog/phash.py` **不改**：`PHASH_AVAILABLE` 的降级保护继续保留，覆盖「自动安装失败 /
+  Host 以 `--no-deps` 安装 / 自定义底层 Python 环境」等边界，避免把依赖缺失升级成
+  插件加载失败。
+- `requirements-worker.txt` 与 `pyproject.toml` 的依赖清单**不改**：phash 在
+  `plugin.py` 主进程执行（第 33 行顶层导入），不在 torch worker 子进程；这两个清单
+  服务于推理环境，不是 Host 自动安装的输入。
+- 版本区间写成两段式（`>=4.3,<5`）：`test_release_gate.py` 的 `_declared_ranges()`
+  用 `float()` 解析版本串，写三段会抛 ValueError。
+
+**代价与风险**（相对 0.7.2「可选依赖」约定，这是刻意的方向变更）
+
+- imagehash 从可选变**硬依赖**：Host 安装失败可能影响插件加载，不再只是 phash 降级。
+- 传递依赖会带入 scipy（wheel 约 36.7 MB）与 PyWavelets；本机 TLS MITM 环境实测
+  scipy 下载约 2 分钟。Host 在插件加载阶段安装，首次启动会变慢，离线 / 受限网络
+  需预先准备。
+- Host 会与自身 `pyproject.toml` 约束做交集冲突检测；scipy 1.18.1 要求
+  `numpy>=2.0.0,<2.8`，与插件 `numpy>=2,<3` 有交集，真机仍以 Host 检测结果为准。
+- 若 Host 以 `--no-deps` 安装 python_package，scipy 不会被带入，phash 会静默降级；
+  此时需显式补装 scipy，或改回「用 numpy 直接实现 DCT-II」的零依赖方案（已实证结果一致）。
+
+**验证**：`gate.sh` 静态自检、系统 py3.12 全量 pytest 与 2026-11-07 的 A1 真实依赖
+实测均通过；具体用例数与哈希值见工作区交付报告。**未真机部署验证**。
+
+## 0.7.2 · 2026-11-06（图片感知哈希去重，可选依赖）
+
+**背景**：0.7.1 的推理缓存键是 `sha256(raw)`。同一张图换 URL、重新编码或缩放后字节不同，
+精确键必然 miss，于是同一张图会重复跑一次模型推理。参考 mohobot
+`mohobot/image_cache.py`（MIT）的感知哈希判定，把「视觉上同一张图」纳入复用。
+
+**修法**
+
+- 新增 `recog/phash.py`：`imagehash` + `Pillow` 为**可选依赖**，任一缺失时
+  `compute_phash()` 返回 `None`，整条链路行为与 0.7.1 完全一致。不新增硬依赖、
+  不改 `capabilities`、不改 `sdk.max_version`。
+- `plugin.py::annotate_received_images`：精确键未命中时，在**完全相同**的
+  `(模型版本, 阈值, DECODE_VERSION)` 作用域内查汉明距离 `< 5` 的感知哈希，
+  命中则复用已有推理结果。作用域不一致一律拒绝——旧模型 / 旧门槛下的判定
+  不允许被当成当前判定（延续 0.7.1 把阈值放进缓存键的约束）。
+- 512 条 FIFO 淘汰时同步清理 `_image_phash` 索引，不留悬空条目。
+- `NOTICE.md` 补上游 MIT 版权与许可声明全文。
+
+**防护**
+
+- `tests/test_phash_cache.py` 8 条：汉明距离与不可比输入、阈值边界（4 命中 / 5 不命中）、
+  缓存作用域隔离、可选依赖降级、感知命中复用推理、改门槛 / 改解码版本不复用、
+  FIFO 淘汰同步。
+- 既有 `tests/test_annotation_policy.py` 16 条回归通过。
+
+**验证**：`gate.sh` check_plugin PASS 72 / WARN 15 / FAIL 0。devkit 门禁的 pytest
+因所选解释器缺依赖记 SKIP（不是通过），已改用系统 Python 3.12 补跑全量：
+**437 passed / 13 skipped**（含本次 8 条）；`test_phash_cache.py` +
+`test_annotation_policy.py` 单跑 24 passed。两个插件均**未真机验证**：
+`imagehash` 未安装时走降级路径，真机是否安装该可选依赖由部署方决定。
+
 ## 0.7.1 · 2026-10-28（WebUI：跨区块跳转后改标签报 `API binding is not declared`）
 
 **现象**：在「训练任务」或「模型版本」页点「查看错判」，再在错判网格里点「是X / 不是X」，

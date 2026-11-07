@@ -11,3 +11,17 @@ data/
 dependencies/
 *.log
 logs/
+dist/
+benchmark-*.json
+
+# 本地训练/评测实验产物（不入库；2026-10-31 批次已归档到 WorkBuddy/_archive/）
+.venv-baseline/
+docs/shared/
+docs/prototype/
+docs/*.jpg
+docs/*.pt
+docs/*.npz
+docs/*.csv
+docs/benchmark-*.json
+docs/production-*.json
+docs/_*.json

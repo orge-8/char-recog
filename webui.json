@@ -1286,6 +1286,11 @@
       "mode": "custom",
       "entry": "webui/environment.html",
       "queries": {
+        "storage": {
+          "api": "self_storage",
+          "version": "1",
+          "parameters": {}
+        },
         "pictures": {
           "api": "self_images",
           "version": "1",
@@ -1418,9 +1423,15 @@
               ]
             }
           },
-          "confirmation": "确认卸载插件依赖？"
-        },
-        "test_upload": {
+      "confirmation": "确认卸载插件依赖？"
+    },
+    "storage_cleanup": {
+      "api": "self_storage_cleanup",
+      "version": "1",
+      "parameters": {},
+      "confirmation": "确认清理可再生成的缓存？将删除超限缩略图、30 天前的安装包缓存和无引用超过 1 小时的临时内容，不会删除原图、模型、报告或任务。"
+    },
+    "test_upload": {
           "api": "self_test_upload",
           "version": "1",
           "parameters": {

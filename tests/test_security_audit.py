@@ -364,14 +364,14 @@ def test_A7_pinned_base_asset_matches_its_sha():
 
 
 def test_A8_no_api_accepts_a_model_path(tmp_path):
-    """可达性边界：47 个 API 里没有一个接受"路径"或"文件名"参数。
+    """可达性边界：49 个 API 里没有一个接受"路径"或"文件名"参数。
 
     这是 F-001 不可被远程触发的结构性原因 —— 不是靠校验挡住的，
     而是根本没有把路径暴露出来。
     """
     source = _source("plugin.py")
     names = _api_names(source)
-    assert len(names) == 47, f"API 数量应为 47，实际 {len(names)}：{sorted(names)}"
+    assert len(names) == 49, f"API 数量应为 49，实际 {len(names)}：{sorted(names)}"
 
     # 每个 API 的参数名都扫一遍
     params = set(re.findall(r"async def \w+\(\s*self,?([^)]*)\)", source))
@@ -1311,8 +1311,8 @@ def test_G3_eight_apis_are_not_reachable_through_the_webui_contract():
 
     walk(webui)
     declared = _api_names(source)
-    assert len(declared) == 47, f"API 总数变了：{len(declared)}"
-    assert len(wired) == 39, f"webui 接线数变了：{len(wired)}"
+    assert len(declared) == 49, f"API 总数变了：{len(declared)}"
+    assert len(wired) == 41, f"webui 接线数变了：{len(wired)}"
     unreachable = sorted(declared - wired)
     assert unreachable == [
         "self_clear_errors",
