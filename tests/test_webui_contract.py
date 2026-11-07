@@ -416,3 +416,14 @@ def test_recognition_results_can_be_promoted_into_the_library():
     assert {"result_id", "character", "label"} <= set(action["parameters"])
     assert "data-promote" in html
 
+
+def test_pages_do_not_use_the_host_14_removed_placement_field():
+    """MaiBot 1.4.0 parses `placement` but emits a deprecation warning.
+
+    Pages now live in the sidebar; keeping the field would make every 1.4.0
+    startup noisy and would fail a future schema tightening.
+    """
+    data = json.loads((ROOT / "webui.json").read_text(encoding="utf-8"))
+    offenders = [page["id"] for page in data["pages"] if "placement" in page]
+    assert not offenders, f"这些页面仍使用已停用的 placement：{offenders}"
+

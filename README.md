@@ -12,7 +12,7 @@
 
 ## 安装
 
-需要 MaiBot **1.3.6 – 1.3.x**、SDK **2.11.0 – 2.13.x**（已在宿主 1.3.6/1.3.7、SDK 2.11.0/2.13.0 上验证），以及支持 `custom_pages`、`image_upload` 的 WebUI。超出该范围的宿主会拒绝加载；若你已在更新的版本上跑通，可自行放宽 `_manifest.json` 的 `max_version`。
+需要 MaiBot **1.3.6 – 1.4.x**、SDK **2.11.0 – 2.21.x**（已用宿主 1.4.0 与 1.3.7 的真实 `PluginLoader` 验证，运行环境 SDK 2.21.0；1.3.6/1.3.7 为历史基线），以及支持 `custom_pages`、`image_upload` 的 WebUI。超出该范围的宿主会拒绝加载；升级宿主后应先按本仓库的兼容验证流程复跑，再调整 `_manifest.json` 的 `max_version`。
 
 1. 把插件目录放入 `plugins/`（例如 `plugins/char-recog`）。
 2. 完整重启 MaiBot（热重载对含 manifest 的插件不生效）。
@@ -215,7 +215,7 @@ recognize_character_image(message_id, image_index=0, character="")
 python -m pytest tests
 ```
 
-**0.6.1 起不再需要 `maibot_sdk` 也能测插件层。** `tests/conftest.py` 在会话开始时把一个最小 SDK 桩装进 `sys.modules`，于是原先恒为「整模块跳过」的 `test_plugin_loads.py`、`test_tool.py`、`test_annotation_policy.py` 现在会真正执行。0.8.0 完整环境实测 **468 collected / 465 passed / 3 skipped**；排除审计与发布门禁两个文件后的变更集口径为 **288 collected**。
+**0.6.1 起不再需要 `maibot_sdk` 也能测插件层。** `tests/conftest.py` 在会话开始时把一个最小 SDK 桩装进 `sys.modules`，于是原先恒为「整模块跳过」的 `test_plugin_loads.py`、`test_tool.py`、`test_annotation_policy.py` 现在会真正执行。0.8.1 完整环境实测 **469 collected / 466 passed / 3 skipped**；排除审计与发布门禁两个文件后的变更集口径为 **289 collected**。
 
 > 这次改动不是锦上添花：0.6.0 把 `Store.ingest` 从 9 个参数砍到 6 个时漏改了 `_capture` 的调用点，整条聊天捕获链路静默失效，**没有任何一条测试报出来**——因为唯一会执行插件层的那三个文件全都是 0 收集。桩只提供 `plugin.py` 实际 import 的 8 个符号，不实现权限模型与 `ctx`；需要宿主行为的测试仍应自带 fake ctx（见 `tests/test_release_gate.py`）。
 

@@ -9,7 +9,6 @@
     {
       "id": "images",
       "title": "图片标注",
-      "placement": "workspace",
       "icon": "database",
       "description": "按角色上传、标注与管理训练图片。",
       "mode": "custom",
@@ -242,7 +241,6 @@
     {
       "id": "capture",
       "title": "待确认",
-      "placement": "workspace",
       "icon": "list",
       "description": "逐组确认聊天里模型拿不准的图片，默认汇总全部角色；确认后才写入训练真值。",
       "mode": "custom",
@@ -384,7 +382,6 @@
     {
       "id": "training",
       "title": "训练任务",
-      "placement": "workspace",
       "icon": "chart",
       "description": "管理训练任务，查看进度、评测报告和错判图片。",
       "mode": "custom",
@@ -727,7 +724,6 @@
     {
       "id": "models",
       "title": "模型版本",
-      "placement": "workspace",
       "icon": "list",
       "description": "核验与启用模型版本，查看报告或回退上一版本。",
       "mode": "custom",
@@ -1102,7 +1098,6 @@
     {
       "id": "test",
       "title": "识别测试",
-      "placement": "workspace",
       "icon": "puzzle",
       "description": "上传新图片测试当前模型，不加入训练库。",
       "mode": "custom",
@@ -1280,7 +1275,6 @@
     {
       "id": "environment",
       "title": "运行环境",
-      "placement": "workspace",
       "icon": "settings",
       "description": "检查依赖与设备，管理插件运行环境。",
       "mode": "custom",

@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "name": "角色识别",
   "description": "按角色标注、训练与版本管理（每角色一个二分类模型）；自动识别收到的图片中的角色并添加上下文提示。基于 SengokuCola/MaiSelfPlugin 泛化改造。",
   "author": {
@@ -16,11 +16,11 @@
   },
   "host_application": {
     "min_version": "1.3.6",
-    "max_version": "1.3.99"
+    "max_version": "1.4.99"
   },
   "sdk": {
     "min_version": "2.11.0",
-    "max_version": "2.13.99"
+    "max_version": "2.21.99"
   },
   "dependencies": [
     {

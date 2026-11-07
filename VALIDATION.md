@@ -277,7 +277,7 @@ python -m pytest tests -q
 ### 未验证的区间（如实标注）
 
 - SDK **2.12.x** 未单独验证。它落在声明区间内，按语义化版本视为兼容，但没有实机记录。
-- `2.14.0` 及以上、宿主 `1.4.0` 及以上**不在**声明范围内，宿主会拒绝加载。若在那些版本上跑通，需要再发一版放宽 `max_version`。
+- `2.14.0` 及以上、宿主 `1.4.0` 及以上在本节记录时**不在**声明范围内；此限制已在 0.8.1 中通过真实宿主验证后解除，见文末「MaiBot 1.4.0 / SDK 2.21.0 验证」。
 
 ### 自查脚本的两处需人工判读（外部脚本，本仓库不含）
 
@@ -400,4 +400,21 @@ python scripts/check_submission.py . --plugin-id org.civetc.char-recog
 
 这组数字不是跨机器性能承诺，也不构成“旧版慢多少”的证据；旧版对照需在同一临时语料上用相同脚本复跑。体积方面，单包 0.8.0 为 **9,856,323 字节 / 32 个文件**（解压后 11,513,005 字节，SHA256 `0b4f698a4f9da8b160ed082e95f84955c50931fd547b7d78bc764d01ad923ac4`），底座仍占约 10.31 MB 原始体积，发布包的小幅变化来自文档与新增测试/工具被排除后的净效应。
 
-**未验证项**：没有在 MaiBot 1.4.0 / SDK 2.21.0 真机上加载；因此本轮不修改 manifest 的宿主/SDK 上限。WebUI 存储面板与推理缓存状态只在浏览器静态语法和 API 契约层验证，未接真机 dashboard 截图。
+**0.8.0 当时的未验证项**：没有在 MaiBot 1.4.0 / SDK 2.21.0 上加载，因此 0.8.0 未修改 manifest 上限。该限制已在 0.8.1 中解除，见下一节。WebUI 存储面板与推理缓存状态仍只在浏览器静态语法和 API 契约层验证，未接真机 dashboard 截图。
+
+## 2026-11-07 MaiBot 1.4.0 / SDK 2.21.0 验证（0.8.1）
+
+官方最新版本（GitHub Release `v1.4.0`，2026-11-07T10:30Z；PyPI `maibot-plugin-sdk==2.21.0`）实测：
+
+- 下载官方 MaiBot **1.4.0 源码**，在隔离 venv 安装 SDK 2.21.0 及 WebUI/manifest 所需依赖。
+- 用宿主真实的 `src.plugin_runtime.runner.plugin_loader.PluginLoader(host_version="1.4.0")` 严格模式加载：
+  `org.civetc.char-recog 0.8.1`、**51 个组件**、**6 个页面**，`failed={}`、`warnings=[]`、`errors=[]`。
+- 用宿主真实的 `src.plugin_runtime.webui_schema.load_webui_extension` 读取 `webui.json`：
+  6 页全部解析成功；移除 `placement` 后无 Pydantic 停用警告。
+- 用宿主 **1.3.7** 的真实 loader 与 WebUI schema 做向后验证：同样加载成功，`warnings=[]`、`errors=[]`，证明 `placement` 移除不破坏旧宿主。
+- `tests/smoke_test.py` 在 SDK 2.21.0 下完成生命周期、组件注册、重复卸载。
+- 完整 `pytest`：**466 passed / 3 skipped / 0 failed**，共 469 collected；变更集口径 289 collected。
+- 变更：`host_application.max_version 1.3.99 → 1.4.99`、`sdk.max_version 2.13.99 → 2.21.99`、移除 6 个页面的 `placement` 字段。
+- 发布包 `dist/char-recog-0.8.1.zip`：**9,856,834 字节 / 32 个文件**（解压后 11,514,061 字节），SHA256 `94e668ffd51fb2424f57722a5985a9ac5268560275bebfe62eaf45068bb4322d`。
+
+**边界**：这是官方源码的真实 loader/WebUI schema 与 SDK 2.21 运行验证，不是完整启动 MaiBot 服务并登录 dashboard 的端到端截图验证；完整 Bot 启动、消息投递和真机 dashboard 仍建议部署后复核。
