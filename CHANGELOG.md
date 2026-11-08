@@ -1,5 +1,24 @@
 # 更新日志
 
+## 0.8.2 · 2026-11-08（WebUI 环境徽章「检测中」卡死修复）
+
+纯前端修复，不改后端行为、模型与数据格式。
+
+- **症状**：冷启动后直接打开「图片标注 / 训练任务」页，右上角徽章永久停在
+  「环境 · 检测中」，训练按钮被禁用；点重载才恢复。真机环境本身正常
+  （`environment-status.json` = complete，torch 2.11.0+cpu 已装）。
+- **根因**：`env` 查询首帧必返 `detecting=true`（探测线程在后台 import torch
+  需数秒），而前端 `pollingNeeded()` 只在「运行环境」tab 对 detecting 轮询，
+  其余 tab 返回 false，且 `load()` 里 `data.env` 一旦有值就不再重查——首帧的
+  「检测中」被永久缓存。
+- **修复**（`webui/index.html`，两处）：
+  1. `load()`：`data.env.detecting` 期间每次刷新都重查 env；
+  2. `pollingNeeded()`：env 处于 `detecting` 或 `progress_running` 时全 tab
+     启动 5 秒轮询（原来仅 environment tab）。
+- 重跑 `webui/build.py`，6 个侧栏页面同步再生成。
+
+效果：徽章最多 5~10 秒自动翻为「已就绪」，训练按钮自动解锁，无需手动重载。
+
 ## 0.8.1 · 2026-11-07（适配 MaiBot 1.4.0 / SDK 2.21.0）
 
 兼容性基线更新，运行逻辑不变。

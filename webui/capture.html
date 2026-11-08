@@ -265,7 +265,9 @@ async function load(silent = false) {
   };
   if (!silent) { $('refresh').disabled = true; $('refresh').textContent = '更新中…'; }
   try {
-    if (!data.env || current === 'environment' || current === 'training') track('env', await query('env'));
+    // 首帧 env 必为 detecting（探测线程后台 import torch 需数秒）。detecting 期间
+    // 每次 load 都重查，否则结果出来后前端仍缓存着「检测中」，训练按钮跟着禁用。
+    if (!data.env || data.env.detecting || current === 'environment' || current === 'training') track('env', await query('env'));
     // Storage walks the whole data tree. Refresh on navigation/manual reload,
     // not on every 5-second activity poll while an install is running.
     if (current === 'environment' && (!data.storage || !silent)) track('storage', await query('storage'));
@@ -301,10 +303,12 @@ async function load(silent = false) {
 }
 function pollingNeeded() {
   if (document.hidden || busy || loading || uploadRunning) return false;
+  // env 检测中/依赖任务进行中时全 tab 轮询：原来只有 environment 页轮询，
+  // 冷启动后直接落在「图片标注/训练任务」页会把首帧的「环境 · 检测中」永久缓存。
+  if (data.env?.detecting || data.env?.progress_running) return true;
   if (tab === 'training') {
     return Boolean(data.jobs?.rows?.some(row => ['queued','running','pausing','cancelling'].includes(row.state)));
   }
-  if (tab === 'environment') return Boolean(data.env?.detecting || data.env?.progress_running);
   return false;
 }
 function schedulePoll() {
